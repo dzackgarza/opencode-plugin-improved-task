@@ -12,6 +12,8 @@ const DEFAULT_SUBAGENT_DESCRIPTION =
 const IMPROVED_TASK_TEST_PASSPHRASE_ENV = "IMPROVED_TASK_TEST_PASSPHRASE";
 const DIRECT_TOOL_NAME = "improved_task";
 const SHADOW_TOOL_NAME = "task";
+const OPENCODE_TRANSCRIPT_PACKAGE =
+  "git+ssh://git@github.com/dzackgarza/opencode-transcripts.git";
 
 const TASK_DESCRIPTION_BASE =
   "Delegate work to a subagent using native task lifecycle semantics. Use this when you need a specialized subagent to handle scoped work and return a result.";
@@ -272,18 +274,16 @@ function buildAsyncFailureOutput(input: {
   ], verificationPassphrase).join("\n");
 }
 
-const TRANSCRIPT_SCRIPT = `${process.env["HOME"] ?? "/root"}/.agents/skills/reading-transcripts/scripts/parse_transcript.py`;
-
 async function saveTranscriptFile(sessionID: string): Promise<string> {
   const outPath = join(
     tmpdir(),
     `opencode-task-${sessionID}-${Date.now()}.transcript.md`,
   );
   try {
-    const { stdout } = await execFileAsync("python", [
-      TRANSCRIPT_SCRIPT,
-      "--harness",
-      "opencode",
+    const { stdout } = await execFileAsync("uvx", [
+      "--from",
+      OPENCODE_TRANSCRIPT_PACKAGE,
+      "opencode-transcript",
       sessionID,
     ]);
     await fs.writeFile(outPath, stdout, "utf8");
