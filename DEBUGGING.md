@@ -1,7 +1,8 @@
 # improved-task debugging
 
 Use the standalone OpenCode binary with the plugin-local `direnv` environment.
-Do not use server-backed harnesses for direct `improved_task` verification.
+For real workflow tests, run a dedicated custom-port `opencode serve` inside the same
+`direnv` environment and point `opencode-manager` at it.
 
 ## Setup
 
@@ -31,12 +32,24 @@ direnv exec . opencode run --agent Minimal \
 
 ## Direct async proof
 
-`opencode run` exits on idle, so async verification must use interactive stdin mode and a shell timeout.
+Async verification should use a repo-local server plus `opencode-manager`, not rendered
+CLI/TUI output.
 
 ```bash
-timeout 120 sh -lc 'printf "%s\n" \
+MANAGER="npx --yes --package=git+ssh://git@github.com/dzackgarza/opencode-manager.git"
+TRANSCRIPT="uvx --from git+ssh://git@github.com/dzackgarza/opencode-transcripts.git opencode-transcript"
+
+direnv exec . /home/dzack/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4198
+
+OPENCODE_BASE_URL=http://127.0.0.1:4198 \
+  $MANAGER opx run --agent Minimal --prompt \
   "Use improved_task exactly twice, both times in async mode with subagent_type general. First create a new child session and wait for its completion message. Then call improved_task again with the returned session_id to resume that same child session, wait for the second completion message, and finally reply with ONLY the two verification passphrases from those two completion messages, one per line, in order. Do not inspect or use any tool other than improved_task." \
-  | direnv exec . opencode --agent Minimal 2>&1'
+  --keep
+
+# Poll the kept parent session for callback-delivered passphrases.
+OPENCODE_BASE_URL=http://127.0.0.1:4198 $MANAGER opx session messages --session <session-id>
+OPENCODE_BASE_URL=http://127.0.0.1:4198 $MANAGER opx debug trace --session <session-id> --verbose
+OPENCODE_BASE_URL=http://127.0.0.1:4198 $TRANSCRIPT <session-id>
 ```
 
 ## Shadow proof
