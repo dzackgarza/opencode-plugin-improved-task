@@ -59,21 +59,55 @@ type SessionMessage = {
   parts?: SessionMessagePart[];
 };
 
-type TaskTerminalSummary = {
-  status: "completed" | "timeout";
+const TOOL_USE_TYPES = [
+  "delegation",
+  "filesystem",
+  "memory",
+  "shell",
+  "web",
+  "other",
+] as const;
+
+type ToolUseType = (typeof TOOL_USE_TYPES)[number];
+
+type TaskTurnSummary = {
+  turnCount: number;
+  reasoningPartCount: number;
+  toolUsesByType: Record<ToolUseType, number>;
+};
+
+type TaskSuccessSummary = {
   sessionID: string;
   subagentType: string;
   subagentModel: string;
-  durationMs: number;
+  timeElapsedMs: number;
+  tokensUsed: number;
   numToolCalls: number;
   transcriptPath: string;
   completionConfidenceScore: number;
   finalResultText: string;
-  totalTokensIn: number;
-  totalTokensOut: number;
-  totalCost: number;
+  turnSummary: TaskTurnSummary;
+};
+
+type TaskFailureSummary = {
+  sessionID: string;
+  subagentType: string;
+  subagentModel: string;
+  timeElapsedMs: number;
+  errorMessage: string;
+  transcriptPath?: string;
   timeoutMs?: number;
 };
+
+type TaskTerminalResult =
+  | {
+      kind: "success";
+      summary: TaskSuccessSummary;
+    }
+  | {
+      kind: "failure";
+      failure: TaskFailureSummary;
+    };
 
 type VerificationPath =
   | "visible"
@@ -147,6 +181,97 @@ function extractText(
     .trim();
 }
 
+function formatTimeElapsed(timeElapsedMs: number): string {
+  return `${(timeElapsedMs / 1000).toFixed(3)}s`;
+}
+
+function emptyToolUsesByType(): Record<ToolUseType, number> {
+  return {
+    delegation: 0,
+    filesystem: 0,
+    memory: 0,
+    shell: 0,
+    web: 0,
+    other: 0,
+  };
+}
+
+function classifyToolUse(toolName: string | undefined): ToolUseType {
+  const normalized = toolName?.trim().toLowerCase() ?? "";
+  if (!normalized) return "other";
+  if (normalized === "task" || normalized === "improved_task") {
+    return "delegation";
+  }
+  if (
+    normalized.includes("bash") ||
+    normalized.includes("shell") ||
+    normalized.includes("command")
+  ) {
+    return "shell";
+  }
+  if (
+    normalized.includes("read") ||
+    normalized.includes("write") ||
+    normalized.includes("edit") ||
+    normalized.includes("list") ||
+    normalized.includes("glob") ||
+    normalized.includes("grep")
+  ) {
+    return "filesystem";
+  }
+  if (
+    normalized.includes("memory") ||
+    normalized.includes("memories")
+  ) {
+    return "memory";
+  }
+  if (normalized.includes("web") || normalized.includes("search")) return "web";
+  return "other";
+}
+
+function summarizeSessionMessages(messages: SessionMessage[]): {
+  numToolCalls: number;
+  tokensUsed: number;
+  turnSummary: TaskTurnSummary;
+} {
+  const toolUsesByType = emptyToolUsesByType();
+  let numToolCalls = 0;
+  let tokensUsed = 0;
+  let reasoningPartCount = 0;
+
+  for (const message of messages) {
+    if (message.info?.role === "assistant") {
+      const total = message.info.tokens?.total;
+      tokensUsed +=
+        typeof total === "number"
+          ? total
+          : (message.info.tokens?.input ?? 0) +
+            (message.info.tokens?.output ?? 0);
+    }
+
+    for (const part of message.parts ?? []) {
+      if (part.type === "tool") {
+        numToolCalls += 1;
+        toolUsesByType[classifyToolUse(part.tool)] += 1;
+        continue;
+      }
+      if (typeof part.type === "string" && part.type.includes("reasoning")) {
+        reasoningPartCount += 1;
+      }
+    }
+  }
+
+  return {
+    numToolCalls,
+    tokensUsed,
+    turnSummary: {
+      turnCount: messages.length,
+      reasoningPartCount,
+      toolUsesByType,
+    },
+  };
+}
+
 
 function formatModelRef(model: TaskModelRef): string {
   return `${model.providerID}/${model.modelID}`;
@@ -160,56 +285,52 @@ function withTaskDisplayMetadata(input: {
   return `${input.description} [with subagent: ${input.subagentType}, ${formatModelRef(input.model)}]`;
 }
 
-// TODO: implement a real completion confidence score.
-// For now, always returns 1.0 (unimplemented placeholder).
-function computeCompletionConfidenceScore(_input: {
+function computeCompletionConfidenceScore(input: {
   messageCount: number;
   finalText: string;
+  numToolCalls: number;
+  reasoningPartCount: number;
 }): number {
-  return 1.0;
+  let score = 0.6;
+  if (input.finalText.trim().length > 0) score += 0.2;
+  if (input.messageCount >= 2) score += 0.1;
+  if (input.numToolCalls > 0 || input.reasoningPartCount > 0) score += 0.1;
+  return Math.min(1, Number(score.toFixed(2)));
+}
+
+function renderTurnSummaryLines(summary: TaskTurnSummary): string[] {
+  return [
+    `- Turns observed: ${summary.turnCount}`,
+    `- Reasoning parts observed: ${summary.reasoningPartCount}`,
+    "- Tool uses by type:",
+    ...TOOL_USE_TYPES.map((toolType) => {
+      return `  - ${toolType}: ${summary.toolUsesByType[toolType]}`;
+    }),
+  ];
 }
 
 function buildTaskSummaryOutput(
-  summary: TaskTerminalSummary,
+  summary: TaskSuccessSummary,
   verificationPassphrase: string,
 ): string {
-  const timeoutBlock =
-    summary.status === "timeout" && typeof summary.timeoutMs === "number"
-      ? [
-          "",
-          "## Timeout Details",
-          `- Configured limit: ${timeoutSeconds(summary.timeoutMs)} seconds`,
-          "- The session transcript may include partial progress up to the timeout boundary.",
-          "- If provider throughput appears constrained (<10–20 turns/min), rerun with a different model and consult the `model-selection` skill.",
-        ]
-      : [];
-
   return appendVerificationPassphrase([
     "---",
-    `status: ${summary.status}`,
     `session_id: ${JSON.stringify(summary.sessionID)}`,
-    `subagent_type: ${JSON.stringify(summary.subagentType)}`,
-    `subagent_model: ${JSON.stringify(summary.subagentModel)}`,
-    `duration_ms: ${summary.durationMs}`,
+    `tokens_used: ${summary.tokensUsed}`,
     `num_tool_calls: ${summary.numToolCalls}`,
-    `tokens_in: ${summary.totalTokensIn}`,
-    `tokens_out: ${summary.totalTokensOut}`,
-    `cost_usd: ${summary.totalCost.toFixed(6)}`,
     `transcript_path: ${JSON.stringify(summary.transcriptPath)}`,
+    `time_elapsed: ${JSON.stringify(formatTimeElapsed(summary.timeElapsedMs))}`,
     "---",
     "",
     "## Agent's Last Message",
     summary.finalResultText,
-    ...timeoutBlock,
     "",
-    "## Transcript",
-    `Full turn-by-turn transcript saved to: \`${summary.transcriptPath}\``,
-    "Read it to debug tool failures, inspect agent reasoning, or verify steps taken.",
+    "## Turn-by-Turn Summary",
+    ...renderTurnSummaryLines(summary.turnSummary),
     "",
-    "## Follow-up",
-    `- Resume: call \`task\` again with \`session_id: ${summary.sessionID}\` and a new \`prompt\`.`,
-    "- Keep `subagent_type` unchanged when resuming so continuation stays on the same specialist path.",
-    "- If the provided `session_id` is invalid, the tool creates a new child session.",
+    "## Completion Review",
+    `- Completion confidence score: ${summary.completionConfidenceScore.toFixed(2)}`,
+    `- Transcript saved to: \`${summary.transcriptPath}\``,
   ], verificationPassphrase).join("\n");
 }
 
@@ -249,29 +370,60 @@ function buildAsyncHeartbeat(input: {
   ].join("\n");
 }
 
-function buildAsyncFailureOutput(input: {
+function buildTaskFailureOutput(input: {
   sessionID: string;
   subagentType: string;
   subagentModel: string;
-  elapsedMs: number;
+  timeElapsedMs: number;
   errorMessage: string;
+  transcriptPath?: string;
+  timeoutMs?: number;
 }, verificationPassphrase: string): string {
+  const timeoutBlock =
+    typeof input.timeoutMs === "number"
+      ? [
+          "",
+          "## Timeout Details",
+          `- Configured limit: ${timeoutSeconds(input.timeoutMs)} seconds`,
+        ]
+      : [];
+
   return appendVerificationPassphrase([
-    "---",
-    "status: failed",
+    "[task_failed]",
     `session_id: ${JSON.stringify(input.sessionID)}`,
     `subagent_type: ${JSON.stringify(input.subagentType)}`,
     `subagent_model: ${JSON.stringify(input.subagentModel)}`,
-    `duration_ms: ${input.elapsedMs}`,
-    "---",
+    `time_elapsed: ${JSON.stringify(formatTimeElapsed(input.timeElapsedMs))}`,
+    ...(input.transcriptPath
+      ? [`transcript_path: ${JSON.stringify(input.transcriptPath)}`]
+      : []),
     "",
-    "## Agent's Last Message",
-    `Task failed with error: ${input.errorMessage}`,
-    "",
-    "## Follow-up",
-    `- Inspect child session \`${input.sessionID}\` in TUI for detailed failure context.`,
-    `- Resume: call \`task\` again with \`session_id: ${input.sessionID}\` and corrective instructions.`,
+    "## Failure",
+    input.errorMessage,
+    ...timeoutBlock,
   ], verificationPassphrase).join("\n");
+}
+
+export const taskReportTesting = {
+  TOOL_USE_TYPES,
+  emptyToolUsesByType,
+  classifyToolUse,
+  summarizeSessionMessages,
+  renderTurnSummaryLines,
+  formatTimeElapsed,
+  computeCompletionConfidenceScore,
+  buildTaskSummaryOutput,
+  buildAsyncRunningOutput,
+  buildTaskFailureOutput,
+};
+
+function buildDisplayedReportReminder(): string {
+  return [
+    "<system-reminder>",
+    "The subagent results report has already been displayed in chat.",
+    "Refer to that displayed report instead of reconstructing it unless the user asks for it again.",
+    "</system-reminder>",
+  ].join("\n");
 }
 
 async function saveTranscriptFile(sessionID: string): Promise<string> {
@@ -295,23 +447,6 @@ async function saveTranscriptFile(sessionID: string): Promise<string> {
     );
   }
   return outPath;
-}
-
-function accumulateTokens(messages: SessionMessage[]): {
-  totalTokensIn: number;
-  totalTokensOut: number;
-  totalCost: number;
-} {
-  let totalTokensIn = 0;
-  let totalTokensOut = 0;
-  let totalCost = 0;
-  for (const msg of messages) {
-    if (msg.info?.role !== "assistant") continue;
-    totalTokensIn += msg.info.tokens?.input ?? 0;
-    totalTokensOut += msg.info.tokens?.output ?? 0;
-    totalCost += msg.info.cost ?? 0;
-  }
-  return { totalTokensIn, totalTokensOut, totalCost };
 }
 
 export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
@@ -426,8 +561,12 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
   };
 
   const sessionExists = async (id: string): Promise<boolean> => {
-    const { data, error } = await client.session.messages({ path: { id } });
-    return !error && Array.isArray(data);
+    const { data, error } = await client.session.list({});
+    return (
+      !error &&
+      Array.isArray(data) &&
+      data.some((session) => session?.id === id)
+    );
   };
 
   const resolveChildSessionID = async (input: {
@@ -480,6 +619,53 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
     return { providerID, modelID };
   };
 
+  const summarizeChildSession = async (sessionID: string) => {
+    const { data: rawMessages, error: messagesError } =
+      await client.session.messages({
+        path: { id: sessionID },
+      });
+    if (messagesError || !Array.isArray(rawMessages)) {
+      throw new Error(
+        `Failed to load child session messages: ${String(messagesError)}`,
+      );
+    }
+
+    const messages = rawMessages as SessionMessage[];
+    return {
+      messages,
+      ...summarizeSessionMessages(messages),
+    };
+  };
+
+  const publishSessionReport = async (input: {
+    sessionID: string;
+    report: string;
+  }): Promise<void> => {
+    if (!client.session?.prompt) return;
+
+    await client.session.prompt({
+      path: { id: input.sessionID },
+      body: {
+        noReply: true,
+        parts: [{ type: "text", text: input.report }],
+      },
+    });
+
+    await client.session.prompt({
+      path: { id: input.sessionID },
+      body: {
+        noReply: true,
+        parts: [
+          {
+            type: "text",
+            synthetic: true,
+            text: buildDisplayedReportReminder(),
+          },
+        ],
+      },
+    });
+  };
+
   const runChildPromptToTerminal = async (input: {
     childSessionID: string;
     subagent: CachedSubagent;
@@ -487,7 +673,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
     prompt: string;
     timeoutMs?: number;
     abortSignal?: AbortSignal;
-  }): Promise<TaskTerminalSummary> => {
+  }): Promise<TaskTerminalResult> => {
     const abortHandler = async () => {
       await client.session
         .abort({ path: { id: input.childSessionID } })
@@ -556,102 +742,101 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       }
 
       const elapsedMs = Date.now() - startedAt;
-      const finalResultText = timedOut
-        ? [
-            `Subagent timeout reached after ${
-              typeof input.timeoutMs === "number"
-                ? timeoutSeconds(input.timeoutMs)
-                : timeoutSeconds(elapsedMs)
-            } seconds.`,
-            "The session transcript was still captured and may include partial progress up to the timeout boundary.",
-          ].join(" ")
-        : text.length > 0
-          ? text
-          : "Subagent completed without a text response.";
+      const finalResultText =
+        text.length > 0 ? text : "Subagent completed without a text response.";
       const renderedModel = formatModelRef(input.model);
-
-      const { data: rawMessages, error: messagesError } =
-        await client.session.messages({
-          path: { id: input.childSessionID },
-        });
-      if (messagesError || !Array.isArray(rawMessages)) {
-        throw new Error(
-          `Failed to load child session messages: ${String(messagesError)}`,
-        );
-      }
-      const messages = rawMessages as SessionMessage[];
-
-      let numToolCalls = 0;
-      for (const msg of messages) {
-        for (const part of msg.parts ?? []) {
-          if (part.type === "tool") numToolCalls += 1;
-        }
-      }
-
-      const { totalTokensIn, totalTokensOut, totalCost } =
-        accumulateTokens(messages);
-
+      const sessionSummary = await summarizeChildSession(input.childSessionID);
       const transcriptPath = await saveTranscriptFile(input.childSessionID);
 
-      const completionConfidenceScore = computeCompletionConfidenceScore({
-        messageCount: messages.length,
-        finalText: text,
-      });
+      if (timedOut) {
+        const timeoutErrorMessage = [
+          `Subagent timeout reached after ${
+            typeof input.timeoutMs === "number"
+              ? timeoutSeconds(input.timeoutMs)
+              : timeoutSeconds(elapsedMs)
+          } seconds.`,
+          "The transcript may contain partial progress up to the timeout boundary.",
+        ].join(" ");
 
-      await log(
-        timedOut ? "warn" : "info",
-        timedOut ? "Task timed out" : "Task completed",
-        {
+        await log("warn", "Task timed out", {
           childSessionID: input.childSessionID,
           subagentType: input.subagent.name,
           elapsedMs,
-          numToolCalls,
-          outputChars: text.length,
+          numToolCalls: sessionSummary.numToolCalls,
           transcriptPath,
-          totalTokensIn,
-          totalTokensOut,
-          totalCost,
-          completionConfidenceScore,
-          ...(timedOut && typeof input.timeoutMs === "number"
+          tokensUsed: sessionSummary.tokensUsed,
+          reasoningPartCount: sessionSummary.turnSummary.reasoningPartCount,
+          ...(typeof input.timeoutMs === "number"
             ? {
                 timeoutMs: input.timeoutMs,
                 timeoutSeconds: timeoutSeconds(input.timeoutMs),
               }
             : {}),
-        },
-      );
+        });
+
+        return {
+          kind: "failure",
+          failure: {
+            sessionID: input.childSessionID,
+            subagentType: input.subagent.name,
+            subagentModel: renderedModel,
+            timeElapsedMs: elapsedMs,
+            errorMessage: timeoutErrorMessage,
+            transcriptPath,
+            ...(typeof input.timeoutMs === "number"
+              ? { timeoutMs: input.timeoutMs }
+              : {}),
+          },
+        };
+      }
+
+      const completionConfidenceScore = computeCompletionConfidenceScore({
+        messageCount: sessionSummary.messages.length,
+        finalText: text,
+        numToolCalls: sessionSummary.numToolCalls,
+        reasoningPartCount: sessionSummary.turnSummary.reasoningPartCount,
+      });
+
+      await log("info", "Task completed", {
+        childSessionID: input.childSessionID,
+        subagentType: input.subagent.name,
+        elapsedMs,
+        numToolCalls: sessionSummary.numToolCalls,
+        outputChars: text.length,
+        transcriptPath,
+        tokensUsed: sessionSummary.tokensUsed,
+        completionConfidenceScore,
+        reasoningPartCount: sessionSummary.turnSummary.reasoningPartCount,
+      });
 
       return {
-        status: timedOut ? "timeout" : "completed",
-        sessionID: input.childSessionID,
-        subagentType: input.subagent.name,
-        subagentModel: renderedModel,
-        durationMs: elapsedMs,
-        numToolCalls,
-        transcriptPath,
-        completionConfidenceScore,
-        finalResultText,
-        totalTokensIn,
-        totalTokensOut,
-        totalCost,
-        ...(timedOut && typeof input.timeoutMs === "number"
-          ? { timeoutMs: input.timeoutMs }
-          : {}),
+        kind: "success",
+        summary: {
+          sessionID: input.childSessionID,
+          subagentType: input.subagent.name,
+          subagentModel: renderedModel,
+          timeElapsedMs: elapsedMs,
+          tokensUsed: sessionSummary.tokensUsed,
+          numToolCalls: sessionSummary.numToolCalls,
+          transcriptPath,
+          completionConfidenceScore,
+          finalResultText,
+          turnSummary: sessionSummary.turnSummary,
+        },
       };
     } finally {
       input.abortSignal?.removeEventListener("abort", abortHandler);
     }
   };
 
-  const emitParentCallback = async (input: {
-    parentSessionID: string;
+  const emitSessionText = async (input: {
+    sessionID: string;
     text: string;
-    terminal: boolean;
   }): Promise<void> => {
     await client.session.promptAsync({
-      path: { id: input.parentSessionID },
+      path: { id: input.sessionID },
       body: {
-        noReply: !input.terminal,
+        noReply: true,
         parts: [{ type: "text", text: input.text }],
       },
     });
@@ -673,10 +858,9 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         subagentType: input.subagent.name,
         elapsedMs: Date.now() - startedAt,
       });
-      void emitParentCallback({
-        parentSessionID: input.parentSessionID,
+      void emitSessionText({
+        sessionID: input.parentSessionID,
         text: heartbeatText,
-        terminal: false,
       }).catch(async (error) => {
         await log("warn", "Async heartbeat emit failed", {
           parentSessionID: input.parentSessionID,
@@ -688,24 +872,30 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
     (heartbeat as { unref?: () => void }).unref?.();
 
     try {
-      const summary = await runChildPromptToTerminal({
+      const result = await runChildPromptToTerminal({
         childSessionID: input.childSessionID,
         subagent: input.subagent,
         model: input.model,
         prompt: input.prompt,
         timeoutMs: input.timeoutMs,
       });
-      await emitParentCallback({
-        parentSessionID: input.parentSessionID,
-        text: buildTaskSummaryOutput(summary, input.verificationPassphrase),
-        terminal: true,
+      const report =
+        result.kind === "success"
+          ? buildTaskSummaryOutput(result.summary, input.verificationPassphrase)
+          : buildTaskFailureOutput(
+              result.failure,
+              input.verificationPassphrase,
+            );
+      await publishSessionReport({
+        sessionID: input.parentSessionID,
+        report,
       });
     } catch (error) {
-      const failureText = buildAsyncFailureOutput({
+      const failureText = buildTaskFailureOutput({
         sessionID: input.childSessionID,
         subagentType: input.subagent.name,
         subagentModel: formatModelRef(input.model),
-        elapsedMs: Date.now() - startedAt,
+        timeElapsedMs: Date.now() - startedAt,
         errorMessage: String(error),
       }, input.verificationPassphrase);
       await log("error", "Async task failed", {
@@ -713,10 +903,9 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         childSessionID: input.childSessionID,
         error: String(error),
       });
-      await emitParentCallback({
-        parentSessionID: input.parentSessionID,
-        text: failureText,
-        terminal: true,
+      await publishSessionReport({
+        sessionID: input.parentSessionID,
+        report: failureText,
       }).catch(async (emitError) => {
         await log("error", "Async failure callback emit failed", {
           parentSessionID: input.parentSessionID,
@@ -871,15 +1060,37 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
           });
         }
 
-        const summary = await runChildPromptToTerminal({
-          childSessionID: childSession.sessionID,
-          subagent,
-          model,
-          prompt: args.prompt,
-          timeoutMs,
-          abortSignal: context.abort,
-        });
-        return buildTaskSummaryOutput(summary, verificationPassphrase);
+        try {
+          const result = await runChildPromptToTerminal({
+            childSessionID: childSession.sessionID,
+            subagent,
+            model,
+            prompt: args.prompt,
+            timeoutMs,
+            abortSignal: context.abort,
+          });
+          const report = result.kind === "success"
+            ? buildTaskSummaryOutput(result.summary, verificationPassphrase)
+            : buildTaskFailureOutput(result.failure, verificationPassphrase);
+          await publishSessionReport({
+            sessionID: context.sessionID,
+            report,
+          });
+          return report;
+        } catch (error) {
+          const report = buildTaskFailureOutput({
+            sessionID: childSession.sessionID,
+            subagentType: subagent.name,
+            subagentModel: formatModelRef(model),
+            timeElapsedMs: 0,
+            errorMessage: String(error),
+          }, verificationPassphrase);
+          await publishSessionReport({
+            sessionID: context.sessionID,
+            report,
+          });
+          return report;
+        }
       },
     });
 

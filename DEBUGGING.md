@@ -23,14 +23,26 @@ direnv exec . opencode run --agent Minimal \
   "If you can see a tool named improved_task and its description includes a verification passphrase, reply with ONLY that passphrase. Otherwise reply with ONLY NONE."
 ```
 
-## Direct sync proof
+## Report contract proof
 
 ```bash
-direnv exec . opencode run --agent Minimal \
-  "Use improved_task with a general subagent to do one short task, then resume the same session for a second short task. After both improved_task calls complete, reply with ONLY the two verification passphrases from those tool results, one per line, in order."
+MANAGER="npx --yes --package=git+ssh://git@github.com/dzackgarza/opencode-manager.git"
+
+direnv exec . /home/dzack/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4198
+
+OPENCODE_BASE_URL=http://127.0.0.1:4198 \
+  $MANAGER opx run --agent Minimal --prompt \
+  "Use improved_task exactly once with mode=sync and subagent_type general. In the child session, reply with ONLY QX4N7A1P. After the tool finishes, answer with ONLY OK." \
+  --keep
+
+OPENCODE_BASE_URL=http://127.0.0.1:4198 \
+  $MANAGER opx session messages --session <parent-session-id>
 ```
 
-## Direct async proof
+Inspect the parent-session messages for the `tool` part output, the published report
+message, and the synthetic reminder, not the rendered TUI.
+
+## Async report proof
 
 Async verification should use a repo-local server plus `opencode-manager`, not rendered
 CLI/TUI output.
@@ -51,6 +63,21 @@ OPENCODE_BASE_URL=http://127.0.0.1:4198 $MANAGER opx session messages --session 
 OPENCODE_BASE_URL=http://127.0.0.1:4198 $MANAGER opx debug trace --session <session-id> --verbose
 OPENCODE_BASE_URL=http://127.0.0.1:4198 $TRANSCRIPT <session-id>
 ```
+
+The async completion path publishes the final report into chat and then adds a
+synthetic reminder, following the same visibility pattern as the improved todo tree.
+
+## Manual TUI acceptance
+
+Actual TUI behavior should be checked manually in a real interactive OpenCode session.
+Use manual acceptance only for:
+
+- task-tile/session-tree rendering
+- child-session attachment in the UI
+- async completion surfacing in the TUI
+- any other rendering-specific behavior
+
+Those are important, but they are not automatable proofs in this repo.
 
 ## Shadow proof
 

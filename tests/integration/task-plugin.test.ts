@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 
@@ -8,29 +9,33 @@ const TOOL_DIR = process.cwd();
 const HOST = "127.0.0.1";
 const MANAGER_PACKAGE =
   "git+ssh://git@github.com/dzackgarza/opencode-manager.git";
-const SEED = "SWORDFISH-TASK";
 const MAX_BUFFER = 8 * 1024 * 1024;
 const SERVER_START_TIMEOUT_MS = 60_000;
 const SESSION_TIMEOUT_MS = 240_000;
+
+type ToolState = {
+  input?: Record<string, unknown>;
+  output?: unknown;
+};
+
+type SessionMessagePart = {
+  type?: string;
+  text?: string;
+  tool?: string;
+  state?: ToolState;
+};
 
 type SessionMessage = {
   info?: {
     role?: string;
   };
-  parts?: Array<{
-    type?: string;
-    text?: string;
-  }>;
+  parts?: SessionMessagePart[];
 };
 
 let baseUrl = "";
 let serverPort = 0;
 let serverProcess: ChildProcess | undefined;
 let serverLogs = "";
-
-function pass(tool: string, path: string) {
-  return `${SEED}:${tool}:${path}`;
-}
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -212,116 +217,423 @@ function readMessages(sessionID: string): SessionMessage[] {
   return JSON.parse(stdout) as SessionMessage[];
 }
 
-function assistantText(messages: SessionMessage[]) {
+function executionToolNames(toolName: "improved_task" | "task") {
+  return toolName === "task"
+    ? new Set(["task", "improved_task"])
+    : new Set(["improved_task"]);
+}
+
+function toolParts(
+  messages: SessionMessage[],
+  toolName: "improved_task" | "task",
+) {
+  const toolNames = executionToolNames(toolName);
   return messages
     .filter((message) => message.info?.role === "assistant")
     .flatMap((message) => message.parts ?? [])
-    .filter((part) => part.type === "text" && typeof part.text === "string")
-    .map((part) => part.text ?? "")
-    .join("\n");
+    .filter((part) => part.type === "tool" && toolNames.has(part.tool ?? ""));
 }
 
-async function waitForAssistantPassphrases(
+function toolOutputs(
+  messages: SessionMessage[],
+  toolName: "improved_task" | "task",
+) {
+  return toolParts(messages, toolName)
+    .map((part) => part.state?.output)
+    .filter((output): output is string => typeof output === "string");
+}
+
+function callbackReports(messages: SessionMessage[]) {
+  return messages
+    .filter((message) => message.info?.role === "user")
+    .flatMap((message) => message.parts ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text ?? "")
+    .filter((text) => {
+      return text.startsWith("---\nsession_id:") && text.includes("## Completion Review");
+    });
+}
+
+function reportReminders(messages: SessionMessage[]) {
+  return messages
+    .filter((message) => message.info?.role === "user")
+    .flatMap((message) => message.parts ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text ?? "")
+    .filter((text) => {
+      return text.includes("The subagent results report has already been displayed in chat.");
+    });
+}
+
+async function waitForToolOutputCount(
   sessionID: string,
-  expected: string[],
+  toolName: "improved_task" | "task",
+  expectedCount: number,
   timeoutMs = 180_000,
 ) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     const messages = readMessages(sessionID);
-    const text = assistantText(messages);
-    if (expected.every((needle) => text.includes(needle))) {
-      return text;
+    const outputs = toolOutputs(messages, toolName);
+    if (outputs.length >= expectedCount) {
+      return { messages, outputs };
     }
     await wait(1_000);
   }
 
   const messages = readMessages(sessionID);
   throw new Error(
-    `Timed out waiting for ${expected.join(", ")}.\n${JSON.stringify(messages, null, 2)}`,
+    `Timed out waiting for ${expectedCount} ${toolName} outputs.\n${JSON.stringify(messages, null, 2)}`,
   );
 }
 
-async function waitForSessionIDLine(
+async function waitForCallbackReportCount(
   sessionID: string,
+  expectedCount: number,
   timeoutMs = 180_000,
 ) {
   const deadline = Date.now() + timeoutMs;
-  const pattern = /SESSION_ID=(ses_[A-Za-z0-9]+)/;
 
   while (Date.now() < deadline) {
-    const text = assistantText(readMessages(sessionID));
-    const match = text.match(pattern);
-    if (match) return match[1];
+    const messages = readMessages(sessionID);
+    const reports = callbackReports(messages);
+    if (reports.length >= expectedCount) {
+      return { messages, reports };
+    }
     await wait(1_000);
   }
 
   const messages = readMessages(sessionID);
   throw new Error(
-    `Timed out waiting for SESSION_ID=... in assistant text.\n${JSON.stringify(messages, null, 2)}`,
+    `Timed out waiting for ${expectedCount} callback reports.\n${JSON.stringify(messages, null, 2)}`,
   );
 }
 
-async function expectOneTurnToProducePassphrases(input: {
-  prompt: string;
-  expected: string[];
-  lingerSeconds?: number;
-}) {
-  let sessionID: string | undefined;
-  try {
-    const result = runPrompt(input.prompt, input.lingerSeconds ?? 0);
-    sessionID = parseKeptSessionID(result.stderr);
-    const text = await waitForAssistantPassphrases(sessionID, input.expected);
-    for (const needle of input.expected) {
-      expect(text).toContain(needle);
+async function waitForReminderCount(
+  sessionID: string,
+  expectedCount: number,
+  timeoutMs = 180_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const messages = readMessages(sessionID);
+    const reminders = reportReminders(messages);
+    if (reminders.length >= expectedCount) {
+      return { messages, reminders };
     }
-  } finally {
-    safeDeleteSession(sessionID);
+    await wait(1_000);
+  }
+
+  const messages = readMessages(sessionID);
+  throw new Error(
+    `Timed out waiting for ${expectedCount} report reminders.\n${JSON.stringify(messages, null, 2)}`,
+  );
+}
+
+function parseScalar(rawValue: string): number | string {
+  const value = rawValue.trim();
+  if (value.startsWith("\"") && value.endsWith("\"")) {
+    return JSON.parse(value) as string;
+  }
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber)) {
+    return asNumber;
+  }
+  return value;
+}
+
+function parseFrontMatter(report: string) {
+  const match = report.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!match) {
+    throw new Error(`Could not parse report front matter.\n${report}`);
+  }
+
+  const metadata = Object.fromEntries(
+    match[1]
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const index = line.indexOf(":");
+        if (index < 0) {
+          throw new Error(`Invalid front matter line: ${line}`);
+        }
+        return [
+          line.slice(0, index).trim(),
+          parseScalar(line.slice(index + 1)),
+        ];
+      }),
+  ) as Record<string, string | number>;
+
+  return {
+    metadata,
+    body: match[2].replace(/^\n/, ""),
+  };
+}
+
+function assertHeaderOrder(body: string, headers: string[]) {
+  let previousIndex = -1;
+  for (const header of headers) {
+    const index = body.indexOf(header);
+    expect(index).toBeGreaterThan(previousIndex);
+    previousIndex = index;
   }
 }
 
-async function expectTwoTurnLifecycle(input: {
+function assertSuccessReport(input: {
+  report: string;
+  expectedToken: string;
+  expectedSessionID?: string;
+}) {
+  const { metadata, body } = parseFrontMatter(input.report);
+
+  expect(Object.keys(metadata).sort()).toEqual([
+    "num_tool_calls",
+    "session_id",
+    "time_elapsed",
+    "tokens_used",
+    "transcript_path",
+  ]);
+  expect(input.report).not.toContain("status:");
+  expect(input.report).not.toContain("cost_usd:");
+  expect(input.report).not.toContain("tokens_in:");
+  expect(input.report).not.toContain("tokens_out:");
+  expect(input.report).not.toContain("duration_ms:");
+
+  expect(typeof metadata.session_id).toBe("string");
+  expect(typeof metadata.tokens_used).toBe("number");
+  expect(typeof metadata.num_tool_calls).toBe("number");
+  expect(typeof metadata.transcript_path).toBe("string");
+  expect(typeof metadata.time_elapsed).toBe("string");
+  if (input.expectedSessionID) {
+    expect(metadata.session_id).toBe(input.expectedSessionID);
+  }
+
+  const transcriptPath = metadata.transcript_path as string;
+  expect(existsSync(transcriptPath)).toBe(true);
+  expect(metadata.tokens_used as number).toBeGreaterThan(0);
+  expect(metadata.num_tool_calls as number).toBeGreaterThanOrEqual(0);
+  expect(metadata.time_elapsed).toMatch(/^\d+\.\d{3}s$/);
+
+  assertHeaderOrder(body, [
+    "## Agent's Last Message",
+    "## Turn-by-Turn Summary",
+    "## Completion Review",
+  ]);
+  expect(body).toContain(input.expectedToken);
+  expect(body).toContain("- Turns observed:");
+  expect(body).toContain("- Reasoning parts observed:");
+  expect(body).toContain("  - delegation:");
+  expect(body).toContain("  - filesystem:");
+  expect(body).toContain("  - memory:");
+  expect(body).toContain("  - shell:");
+  expect(body).toContain("  - web:");
+  expect(body).toContain("  - other:");
+  expect(body).toContain("- Completion confidence score:");
+  expect(body).toContain("Transcript saved to:");
+
+  const transcript = readFileSync(transcriptPath, "utf8");
+  expect(transcript).toContain(input.expectedToken);
+
+  return metadata;
+}
+
+function assertRunningNotice(input: {
+  report: string;
+  expectedSessionID?: string;
+}) {
+  const { metadata, body } = parseFrontMatter(input.report);
+
+  expect(metadata.status).toBe("running");
+  expect(typeof metadata.session_id).toBe("string");
+  if (input.expectedSessionID) {
+    expect(metadata.session_id).toBe(input.expectedSessionID);
+  }
+  expect(body).toContain("Task is running in the background.");
+  return metadata.session_id as string;
+}
+
+function lifecyclePrompt(input: {
   toolName: "improved_task" | "task";
   mode: "sync" | "async";
+  token: string;
+  sessionID?: string;
 }) {
-  let parentSessionID: string | undefined;
-  let childSessionID: string | undefined;
-  const firstPassphrase = pass(input.toolName, `${input.mode}:new`);
-  const secondPassphrase = pass(input.toolName, `${input.mode}:resume`);
-  const lingerSeconds = input.mode === "async" ? 30 : 0;
-
-  const firstPrompt = [
-    `Use ${input.toolName} exactly once with mode=${input.mode} and subagent_type general.`,
-    "Create a new child session and complete one short task.",
-    "After the tool finishes, reply with ONLY the verification passphrase from the tool result on the first line.",
-    "On the second line, reply with SESSION_ID=<the returned session_id>.",
+  const sessionClause = input.sessionID
+    ? ` and session_id=${input.sessionID}`
+    : "";
+  return [
+    `Use ${input.toolName} exactly once with mode=${input.mode} and subagent_type general${sessionClause}.`,
+    `In the child session, reply with ONLY ${input.token}.`,
+    "After the tool finishes, answer with ONLY OK.",
     `Do not inspect or use any tool other than ${input.toolName}.`,
   ].join(" ");
+}
+
+async function expectSyncLifecycleReport(toolName: "improved_task" | "task") {
+  let parentSessionID: string | undefined;
+  let childSessionID: string | undefined;
+  const firstToken =
+    toolName === "improved_task" ? "QX4N7A1P" : "LM2R8C1K";
+  const secondToken =
+    toolName === "improved_task" ? "QX4N7A2P" : "LM2R8C2K";
 
   try {
-    const firstRun = runPrompt(firstPrompt, lingerSeconds);
+    const firstRun = runPrompt(
+      lifecyclePrompt({
+        toolName,
+        mode: "sync",
+        token: firstToken,
+      }),
+    );
     parentSessionID = parseKeptSessionID(firstRun.stderr);
 
-    const firstText = await waitForAssistantPassphrases(parentSessionID, [
-      firstPassphrase,
-    ]);
-    expect(firstText).toContain(firstPassphrase);
+    const firstResult = await waitForToolOutputCount(parentSessionID, toolName, 1);
+    const firstMetadata = assertSuccessReport({
+      report: firstResult.outputs[0],
+      expectedToken: firstToken,
+    });
+    const firstPublished = await waitForCallbackReportCount(parentSessionID, 1);
+    expect(firstPublished.reports[0]).toBe(firstResult.outputs[0]);
+    const firstReminder = await waitForReminderCount(parentSessionID, 1);
+    expect(firstReminder.reminders[0]).toContain(
+      "The subagent results report has already been displayed in chat.",
+    );
+    childSessionID = firstMetadata.session_id as string;
 
-    childSessionID = await waitForSessionIDLine(parentSessionID);
+    resumePrompt(
+      parentSessionID,
+      lifecyclePrompt({
+        toolName,
+        mode: "sync",
+        token: secondToken,
+        sessionID: childSessionID,
+      }),
+    );
 
-    const secondPrompt = [
-      `Use ${input.toolName} exactly once with mode=${input.mode}, subagent_type general, and session_id=${childSessionID}.`,
-      "Resume that same child session for one short task.",
-      "After the tool finishes, reply with ONLY the verification passphrase from the tool result.",
-      `Do not inspect or use any tool other than ${input.toolName}.`,
-    ].join(" ");
+    const secondResult = await waitForToolOutputCount(parentSessionID, toolName, 2);
+    assertSuccessReport({
+      report: secondResult.outputs[1],
+      expectedToken: secondToken,
+      expectedSessionID: childSessionID,
+    });
+    const secondPublished = await waitForCallbackReportCount(parentSessionID, 2);
+    expect(secondPublished.reports[1]).toBe(secondResult.outputs[1]);
+    const secondReminder = await waitForReminderCount(parentSessionID, 2);
+    expect(secondReminder.reminders[1]).toContain(
+      "The subagent results report has already been displayed in chat.",
+    );
+  } finally {
+    safeDeleteSession(childSessionID);
+    safeDeleteSession(parentSessionID);
+  }
+}
 
-    resumePrompt(parentSessionID, secondPrompt, lingerSeconds);
-    const secondText = await waitForAssistantPassphrases(parentSessionID, [
-      secondPassphrase,
-    ]);
-    expect(secondText).toContain(secondPassphrase);
+async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
+  let parentSessionID: string | undefined;
+  let childSessionID: string | undefined;
+  const firstToken =
+    toolName === "improved_task" ? "QX4N7B1P" : "LM2R8D1K";
+  const secondToken =
+    toolName === "improved_task" ? "QX4N7B2P" : "LM2R8D2K";
+
+  try {
+    const firstRun = runPrompt(
+      lifecyclePrompt({
+        toolName,
+        mode: "async",
+        token: firstToken,
+      }),
+      30,
+    );
+    parentSessionID = parseKeptSessionID(firstRun.stderr);
+
+    const firstToolResult = await waitForToolOutputCount(
+      parentSessionID,
+      toolName,
+      1,
+    );
+    childSessionID = assertRunningNotice({
+      report: firstToolResult.outputs[0],
+    });
+
+    const firstCallback = await waitForCallbackReportCount(parentSessionID, 1);
+    assertSuccessReport({
+      report: firstCallback.reports[0],
+      expectedToken: firstToken,
+      expectedSessionID: childSessionID,
+    });
+    const firstReminder = await waitForReminderCount(parentSessionID, 1);
+    expect(firstReminder.reminders[0]).toContain(
+      "The subagent results report has already been displayed in chat.",
+    );
+
+    resumePrompt(
+      parentSessionID,
+      lifecyclePrompt({
+        toolName,
+        mode: "async",
+        token: secondToken,
+        sessionID: childSessionID,
+      }),
+      30,
+    );
+
+    const secondToolResult = await waitForToolOutputCount(
+      parentSessionID,
+      toolName,
+      2,
+    );
+    assertRunningNotice({
+      report: secondToolResult.outputs[1],
+      expectedSessionID: childSessionID,
+    });
+
+    const secondCallback = await waitForCallbackReportCount(parentSessionID, 2);
+    assertSuccessReport({
+      report: secondCallback.reports[1],
+      expectedToken: secondToken,
+      expectedSessionID: childSessionID,
+    });
+    const secondReminder = await waitForReminderCount(parentSessionID, 2);
+    expect(secondReminder.reminders[1]).toContain(
+      "The subagent results report has already been displayed in chat.",
+    );
+  } finally {
+    safeDeleteSession(childSessionID);
+    safeDeleteSession(parentSessionID);
+  }
+}
+
+async function expectInvalidSessionFallback() {
+  let parentSessionID: string | undefined;
+  let childSessionID: string | undefined;
+  const invalidSessionID = "ses_INVALID_CHILD_SESSION_20260311";
+  const token = "ZX8M5F1Q";
+
+  try {
+    const run = runPrompt(
+      lifecyclePrompt({
+        toolName: "improved_task",
+        mode: "sync",
+        token,
+        sessionID: invalidSessionID,
+      }),
+    );
+    parentSessionID = parseKeptSessionID(run.stderr);
+
+    const result = await waitForToolOutputCount(parentSessionID, "improved_task", 1);
+    const firstToolPart = toolParts(result.messages, "improved_task")[0];
+    expect(firstToolPart.state?.input?.session_id).toBe(invalidSessionID);
+
+    const metadata = assertSuccessReport({
+      report: result.outputs[0],
+      expectedToken: token,
+    });
+    childSessionID = metadata.session_id as string;
+    expect(childSessionID).not.toBe(invalidSessionID);
   } finally {
     safeDeleteSession(childSessionID);
     safeDeleteSession(parentSessionID);
@@ -336,39 +648,24 @@ afterAll(async () => {
   await stopServer();
 }, 15_000);
 
-describe("improved-task live e2e", () => {
-  it("proves improved_task visibility", async () => {
-    await expectOneTurnToProducePassphrases({
-      prompt:
-        "If you can see a tool named improved_task and its description includes a verification passphrase, reply with ONLY that passphrase. Otherwise reply with ONLY NONE.",
-      expected: [pass("improved_task", "visible")],
-    });
-  }, 200_000);
-
-  it("proves improved_task sync new and resume", async () => {
-    await expectTwoTurnLifecycle({
-      toolName: "improved_task",
-      mode: "sync",
-    });
+describe("improved-task live report contract", () => {
+  it("proves improved_task sync report contract and resume", async () => {
+    await expectSyncLifecycleReport("improved_task");
   }, 220_000);
 
-  it("proves improved_task async new and resume", async () => {
-    await expectTwoTurnLifecycle({ toolName: "improved_task", mode: "async" });
+  it("proves improved_task async running notice and callback report", async () => {
+    await expectAsyncLifecycleReport("improved_task");
   }, 240_000);
 
-  it("proves task shadow visibility", async () => {
-    await expectOneTurnToProducePassphrases({
-      prompt:
-        "If you can see a tool named task and its description includes a verification passphrase, reply with ONLY that passphrase. Otherwise reply with ONLY NONE.",
-      expected: [pass("task", "visible")],
-    });
-  }, 200_000);
-
-  it("proves task sync new and resume", async () => {
-    await expectTwoTurnLifecycle({ toolName: "task", mode: "sync" });
+  it("proves task sync report contract and resume", async () => {
+    await expectSyncLifecycleReport("task");
   }, 220_000);
 
-  it("proves task async new and resume", async () => {
-    await expectTwoTurnLifecycle({ toolName: "task", mode: "async" });
+  it("proves task async running notice and callback report", async () => {
+    await expectAsyncLifecycleReport("task");
   }, 240_000);
+
+  it("proves invalid session_id falls back to a new child session", async () => {
+    await expectInvalidSessionFallback();
+  }, 220_000);
 });

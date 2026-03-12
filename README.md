@@ -46,6 +46,33 @@ At runtime, the plugin appends the available subagent list and a verification pa
 
 The `task` tool shares the same schema and runtime behavior as `improved_task`. This plugin intentionally shadows the built-in `task` name.
 
+## Output Contract
+
+Successful sync completion returns a markdown report with YAML front matter:
+
+- `session_id`
+- `tokens_used`
+- `num_tool_calls`
+- `transcript_path`
+- `time_elapsed`
+
+The report body is organized into these sections:
+
+- `## Agent's Last Message`
+- `## Turn-by-Turn Summary`
+- `## Completion Review`
+
+The report is also published into the parent session chat so both the user and later
+agent turns can refer to the displayed result directly. A synthetic reminder is added
+after the report to discourage redundant restatement.
+
+Async calls return an initial running notice immediately and publish the same success
+report into the parent session chat when the child session completes.
+
+Actual TUI rendering remains a manual acceptance boundary. The plugin owns the
+shadowing and session/report contract; OpenCode owns how that contract is rendered
+in the interface.
+
 ## Dependencies
 
 - Runtime: Bun, OpenCode, `@opencode-ai/plugin`
