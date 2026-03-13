@@ -4,6 +4,13 @@
 
 This OpenCode plugin adds the `improved_task` tool and shadows the built-in `task` tool with a plugin-backed implementation.
 
+## Features
+
+- Shadows the built-in `task` tool with persistent SQLite-backed task storage
+- Exposes `improved_task` for structured task creation, update, and deletion with zero-knowledge UUID proof
+- XDG-compliant state storage under `XDG_STATE_HOME`
+- Async task dispatch via `client.session.promptAsync`
+
 ## Install
 
 Install the plugin from its directory:
