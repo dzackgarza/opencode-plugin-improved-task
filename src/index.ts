@@ -14,8 +14,11 @@ const DEFAULT_SUBAGENT_DESCRIPTION =
 const IMPROVED_TASK_TEST_PASSPHRASE_ENV = "IMPROVED_TASK_TEST_PASSPHRASE";
 const DIRECT_TOOL_NAME = "improved_task";
 const SHADOW_TOOL_NAME = "task";
-const OPENCODE_TRANSCRIPT_PACKAGE =
-  "git+ssh://git@github.com/dzackgarza/opencode-transcripts.git";
+const AI_PROMPTS_PACKAGE = "git+https://github.com/dzackgarza/ai-prompts.git";
+const LLM_RUNNER_PACKAGE = "git+https://github.com/dzackgarza/llm-runner.git";
+const OPENCODE_MANAGER_PACKAGE =
+  "git+ssh://git@github.com/dzackgarza/opencode-manager.git";
+const TRANSCRIPT_SUMMARY_PROMPT_SLUG = "micro-agents/transcript-summary";
 
 const TASK_DESCRIPTION_BASE =
   "Use when you need a specialized subagent to handle scoped work and return a result. Delegate work to a subagent using native task lifecycle semantics.";
@@ -23,6 +26,8 @@ const AGENT_FETCH_TIMEOUT_MS = 3000;
 const SUBAGENT_CACHE_TTL_MS = 60_000;
 const ASYNC_HEARTBEAT_INTERVAL_MS = 15_000;
 const DEFAULT_TASK_TIMEOUT_MS = 1_800_000;
+const CLI_TIMEOUT_MS = 120_000;
+const CLI_MAX_BUFFER = 16 * 1024 * 1024;
 
 type TaskModelRef = {
   providerID: string;
@@ -72,10 +77,29 @@ const TOOL_USE_TYPES = [
 
 type ToolUseType = (typeof TOOL_USE_TYPES)[number];
 
+type TranscriptSummaryToolCall = {
+  tool: string;
+  purpose: string;
+  result: string;
+};
+
+type TranscriptSummaryEdit = {
+  target: string;
+  rationale: string;
+};
+
+type TranscriptNarrativeSummary = {
+  toolCalls: TranscriptSummaryToolCall[];
+  reasoningSteps: string[];
+  edits: TranscriptSummaryEdit[];
+  outcome: string;
+};
+
 type TaskTurnSummary = {
   turnCount: number;
   reasoningPartCount: number;
   toolUsesByType: Record<ToolUseType, number>;
+  narrative: TranscriptNarrativeSummary;
 };
 
 type TaskSuccessSummary = {
@@ -117,6 +141,74 @@ type VerificationPath =
   | "sync:resume"
   | "async:new"
   | "async:resume";
+
+type AiPromptEntry = {
+  text?: string;
+};
+
+type TranscriptSummaryStructured = {
+  tool_calls?: Array<{
+    tool?: string;
+    purpose?: string;
+    result?: string;
+  }>;
+  reasoning_steps?: string[];
+  edits?: Array<{
+    target?: string;
+    rationale?: string;
+  }>;
+  outcome?: string;
+};
+
+type TranscriptStepDocument = {
+  contentText?: string;
+  duration: string;
+  heading: string;
+  index: number;
+  inputText?: string;
+  outputText?: string;
+  status?: string;
+  tool?: string;
+  type: string;
+};
+
+type TranscriptAssistantMessageDocument = {
+  duration: string;
+  finish: string;
+  index: number;
+  reasoning: string[];
+  steps: TranscriptStepDocument[];
+  text: string;
+};
+
+type TranscriptTurnDocument = {
+  assistantMessages: TranscriptAssistantMessageDocument[];
+  duration: string;
+  index: number;
+  userPrompt: string;
+};
+
+type TranscriptDocument = {
+  directory: string;
+  sessionID: string;
+  title: string;
+  turns: TranscriptTurnDocument[];
+};
+
+type RunnerResponse<T = unknown> = {
+  final_output?: {
+    data?: T | null;
+  };
+  response?: {
+    structured?: T | null;
+  };
+};
+
+type TranscriptArtifact = {
+  document: TranscriptDocument;
+  path: string;
+  rawText: string;
+};
 
 class TaskTimeoutError extends Error {
   constructor(label: string, timeoutMs: number) {
@@ -198,6 +290,15 @@ function emptyToolUsesByType(): Record<ToolUseType, number> {
   };
 }
 
+function emptyTranscriptNarrativeSummary(): TranscriptNarrativeSummary {
+  return {
+    toolCalls: [],
+    reasoningSteps: [],
+    edits: [],
+    outcome: "Subagent completed without a transcript-derived narrative outcome.",
+  };
+}
+
 function classifyToolUse(toolName: string | undefined): ToolUseType {
   const normalized = toolName?.trim().toLowerCase() ?? "";
   if (!normalized) return "other";
@@ -270,6 +371,7 @@ function summarizeSessionMessages(messages: SessionMessage[]): {
       turnCount: messages.length,
       reasoningPartCount,
       toolUsesByType,
+      narrative: emptyTranscriptNarrativeSummary(),
     },
   };
 }
@@ -300,7 +402,7 @@ function computeCompletionConfidenceScore(input: {
   return Math.min(1, Number(score.toFixed(2)));
 }
 
-function renderTurnSummaryLines(summary: TaskTurnSummary): string[] {
+function renderObservedCountLines(summary: TaskTurnSummary): string[] {
   return [
     `- Turns observed: ${summary.turnCount}`,
     `- Reasoning parts observed: ${summary.reasoningPartCount}`,
@@ -308,6 +410,36 @@ function renderTurnSummaryLines(summary: TaskTurnSummary): string[] {
     ...TOOL_USE_TYPES.map((toolType) => {
       return `  - ${toolType}: ${summary.toolUsesByType[toolType]}`;
     }),
+  ];
+}
+
+function renderTranscriptNarrativeLines(summary: TaskTurnSummary): string[] {
+  const lines: string[] = [];
+
+  for (const toolCall of summary.narrative.toolCalls) {
+    lines.push(
+      `- Tool ${toolCall.tool}: ${toolCall.purpose}. Result: ${toolCall.result}`,
+    );
+  }
+
+  for (const reasoningStep of summary.narrative.reasoningSteps) {
+    lines.push(`- Reasoning: ${reasoningStep}`);
+  }
+
+  for (const edit of summary.narrative.edits) {
+    lines.push(`- Edit ${edit.target}: ${edit.rationale}`);
+  }
+
+  lines.push(`- Outcome: ${summary.narrative.outcome}`);
+  return lines;
+}
+
+function renderTurnSummaryLines(summary: TaskTurnSummary): string[] {
+  return [
+    ...renderTranscriptNarrativeLines(summary),
+    "",
+    "### Observed Counts",
+    ...renderObservedCountLines(summary),
   ];
 }
 
@@ -444,27 +576,223 @@ function extractStructuredSessionID(output: string): string | undefined {
   return match?.[1];
 }
 
-async function saveTranscriptFile(sessionID: string): Promise<string> {
-  const outPath = join(
-    tmpdir(),
-    `opencode-task-${sessionID}-${Date.now()}.transcript.md`,
-  );
-  try {
-    const { stdout } = await execFileAsync("uvx", [
+let cachedTranscriptSummaryPrompt: string | undefined;
+
+const transcriptSummaryCache = new Map<
+  string,
+  {
+    transcript: string;
+    summary: TranscriptNarrativeSummary;
+  }
+>();
+
+async function loadTranscriptSummaryPrompt(): Promise<string> {
+  if (cachedTranscriptSummaryPrompt) {
+    return cachedTranscriptSummaryPrompt;
+  }
+
+  const { stdout } = await execFileAsync(
+    "uvx",
+    [
       "--from",
-      OPENCODE_TRANSCRIPT_PACKAGE,
-      "opencode-transcript",
-      sessionID,
-    ]);
-    await fs.writeFile(outPath, stdout, "utf8");
-  } catch {
-    await fs.writeFile(
-      outPath,
-      `# Transcript unavailable\nSession ID: ${sessionID}\n`,
-      "utf8",
+      AI_PROMPTS_PACKAGE,
+      "ai-prompts",
+      "get",
+      TRANSCRIPT_SUMMARY_PROMPT_SLUG,
+      "--json",
+    ],
+    {
+      timeout: CLI_TIMEOUT_MS,
+      maxBuffer: CLI_MAX_BUFFER,
+    },
+  );
+
+  const payload = JSON.parse(stdout) as AiPromptEntry;
+  if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
+    throw new Error(
+      `Prompt ${TRANSCRIPT_SUMMARY_PROMPT_SLUG} did not return prompt text.`,
     );
   }
-  return outPath;
+
+  cachedTranscriptSummaryPrompt = payload.text;
+  return cachedTranscriptSummaryPrompt;
+}
+
+function normalizeTranscriptDocument(input: unknown): TranscriptDocument {
+  if (!input || typeof input !== "object") {
+    throw new Error("Transcript renderer returned a non-object payload.");
+  }
+  const transcript = input as Partial<TranscriptDocument>;
+  if (
+    typeof transcript.sessionID !== "string" ||
+    typeof transcript.title !== "string" ||
+    typeof transcript.directory !== "string" ||
+    !Array.isArray(transcript.turns)
+  ) {
+    throw new Error("Transcript renderer returned an invalid transcript document.");
+  }
+  return transcript as TranscriptDocument;
+}
+
+async function runTemplateSummary(
+  transcript: TranscriptDocument,
+): Promise<TranscriptSummaryStructured> {
+  const promptText = await loadTranscriptSummaryPrompt();
+  const requestPath = join(
+    tmpdir(),
+    `opencode-task-transcript-summary-${Date.now()}.json`,
+  );
+
+  try {
+    await fs.writeFile(
+      requestPath,
+      JSON.stringify(
+        {
+          template: {
+            text: promptText,
+            name: TRANSCRIPT_SUMMARY_PROMPT_SLUG,
+          },
+          bindings: {
+            data: {
+              transcript,
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const { stdout } = await execFileAsync(
+      "uvx",
+      [
+        "--from",
+        LLM_RUNNER_PACKAGE,
+        "llm-run",
+        "--input",
+        requestPath,
+      ],
+      {
+        timeout: CLI_TIMEOUT_MS,
+        maxBuffer: CLI_MAX_BUFFER,
+      },
+    );
+
+    const payload = JSON.parse(stdout) as RunnerResponse<TranscriptSummaryStructured>;
+    const structured =
+      payload.final_output?.data ?? payload.response?.structured ?? null;
+    if (!structured || typeof structured !== "object") {
+      throw new Error("Transcript summary runner returned no structured payload.");
+    }
+    return structured;
+  } finally {
+    await fs.rm(requestPath, { force: true }).catch(() => {});
+  }
+}
+
+function normalizeTranscriptSummary(
+  input: TranscriptSummaryStructured,
+): TranscriptNarrativeSummary {
+  const toolCalls = Array.isArray(input.tool_calls)
+    ? input.tool_calls.flatMap((entry) => {
+        if (
+          typeof entry?.tool !== "string" ||
+          typeof entry?.purpose !== "string" ||
+          typeof entry?.result !== "string"
+        ) {
+          return [];
+        }
+        return [{
+          tool: entry.tool.trim(),
+          purpose: entry.purpose.trim(),
+          result: entry.result.trim(),
+        }];
+      })
+    : [];
+
+  const reasoningSteps = Array.isArray(input.reasoning_steps)
+    ? input.reasoning_steps
+        .filter((step): step is string => typeof step === "string")
+        .map((step) => step.trim())
+        .filter(Boolean)
+    : [];
+
+  const edits = Array.isArray(input.edits)
+    ? input.edits.flatMap((entry) => {
+        if (
+          typeof entry?.target !== "string" ||
+          typeof entry?.rationale !== "string"
+        ) {
+          return [];
+        }
+        return [{
+          target: entry.target.trim(),
+          rationale: entry.rationale.trim(),
+        }];
+      })
+    : [];
+
+  const outcome =
+    typeof input.outcome === "string" && input.outcome.trim().length > 0
+      ? input.outcome.trim()
+      : emptyTranscriptNarrativeSummary().outcome;
+
+  return {
+    toolCalls,
+    reasoningSteps,
+    edits,
+    outcome,
+  };
+}
+
+async function summarizeTranscript(input: {
+  sessionID: string;
+  transcript: TranscriptDocument;
+  transcriptRawText: string;
+}): Promise<TranscriptNarrativeSummary> {
+  const cached = transcriptSummaryCache.get(input.sessionID);
+  if (cached && cached.transcript === input.transcriptRawText) {
+    return cached.summary;
+  }
+
+  const summary = normalizeTranscriptSummary(
+    await runTemplateSummary(input.transcript),
+  );
+  transcriptSummaryCache.set(input.sessionID, {
+    transcript: input.transcriptRawText,
+    summary,
+  });
+  return summary;
+}
+
+async function loadTranscriptArtifact(sessionID: string): Promise<TranscriptArtifact> {
+  const outPath = join(
+    tmpdir(),
+    `opencode-task-${sessionID}-${Date.now()}.transcript.json`,
+  );
+  const { stdout } = await execFileAsync(
+    "npx",
+    [
+      "--yes",
+      `--package=${OPENCODE_MANAGER_PACKAGE}`,
+      "opx-session",
+      "transcript",
+      sessionID,
+      "--json",
+    ],
+    {
+      timeout: CLI_TIMEOUT_MS,
+      maxBuffer: CLI_MAX_BUFFER,
+      env: process.env,
+    },
+  );
+  await fs.writeFile(outPath, stdout, "utf8");
+  return {
+    document: normalizeTranscriptDocument(JSON.parse(stdout)),
+    path: outPath,
+    rawText: stdout,
+  };
 }
 
 export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
@@ -764,7 +1092,12 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         text.length > 0 ? text : "Subagent completed without a text response.";
       const renderedModel = formatModelRef(input.model);
       const sessionSummary = await summarizeChildSession(input.childSessionID);
-      const transcriptPath = await saveTranscriptFile(input.childSessionID);
+      const transcript = await loadTranscriptArtifact(input.childSessionID);
+      const narrativeSummary = await summarizeTranscript({
+        sessionID: input.childSessionID,
+        transcript: transcript.document,
+        transcriptRawText: transcript.rawText,
+      });
 
       if (timedOut) {
         const timeoutErrorMessage = [
@@ -781,7 +1114,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
           subagentType: input.subagent.name,
           elapsedMs,
           numToolCalls: sessionSummary.numToolCalls,
-          transcriptPath,
+          transcriptPath: transcript.path,
           tokensUsed: sessionSummary.tokensUsed,
           reasoningPartCount: sessionSummary.turnSummary.reasoningPartCount,
           ...(typeof input.timeoutMs === "number"
@@ -800,7 +1133,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
             subagentModel: renderedModel,
             timeElapsedMs: elapsedMs,
             errorMessage: timeoutErrorMessage,
-            transcriptPath,
+            transcriptPath: transcript.path,
             ...(typeof input.timeoutMs === "number"
               ? { timeoutMs: input.timeoutMs }
               : {}),
@@ -821,7 +1154,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         elapsedMs,
         numToolCalls: sessionSummary.numToolCalls,
         outputChars: text.length,
-        transcriptPath,
+        transcriptPath: transcript.path,
         tokensUsed: sessionSummary.tokensUsed,
         completionConfidenceScore,
         reasoningPartCount: sessionSummary.turnSummary.reasoningPartCount,
@@ -836,10 +1169,13 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
           timeElapsedMs: elapsedMs,
           tokensUsed: sessionSummary.tokensUsed,
           numToolCalls: sessionSummary.numToolCalls,
-          transcriptPath,
+          transcriptPath: transcript.path,
           completionConfidenceScore,
           finalResultText,
-          turnSummary: sessionSummary.turnSummary,
+          turnSummary: {
+            ...sessionSummary.turnSummary,
+            narrative: narrativeSummary,
+          },
         },
       };
     } finally {

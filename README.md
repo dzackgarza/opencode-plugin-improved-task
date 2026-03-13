@@ -10,18 +10,11 @@ Install the plugin from its directory:
 
 ```bash
 cd improved-task
+direnv allow .
 just install
 ```
 
-Register the plugin in OpenCode via `file:`:
-
-```json
-{
-  "plugin": ["file:///path/to/opencode-plugins/improved-task/"]
-}
-```
-
-See the sample local configuration: [`.config/opencode.json`](./.config/opencode.json).
+Repo-local verification uses [`.envrc`](./.envrc), [`.config/opencode.json`](./.config/opencode.json), and a checked-in symlink under [`.config/plugins`](./.config/plugins) so OpenCode loads the real exporter without a machine-specific `file://` path.
 
 **Note:** This package depends on the OpenCode child-session lifecycle and does not function as a standalone MCP server.
 
@@ -64,6 +57,13 @@ The report body is organized into these sections:
 - `## Turn-by-Turn Summary`
 - `## Completion Review`
 
+The turn summary is built from the `opencode-manager` transcript renderer plus the
+structured transcript JSON surface (`opx-session transcript --json`) plus the
+centralized prompt slug `micro-agents/transcript-summary` resolved through
+`ai-prompts`. It includes transcript-derived narrative bullets first, then a
+deterministic `### Observed Counts` block. `transcript_path` points to that
+structured JSON artifact.
+
 The report is also published into the parent session chat so both the user and later
 agent turns can refer to the displayed result directly. A synthetic reminder is added
 after the report to discourage redundant restatement.
@@ -76,18 +76,28 @@ shadowing and session/report contract; OpenCode owns how that contract is render
 in the interface.
 
 Tool-description inspection proves visibility only. Execution and resume proofs in this
-repo rely on raw tool outputs, published reports, transcripts, and result-path
-verification passphrases that are unavailable before execution.
+repo rely on raw tool outputs, published reports, manager-rendered transcripts, and
+result-path verification passphrases that are unavailable before execution.
 
 ## Dependencies
 
 - Runtime: Bun, OpenCode, `@opencode-ai/plugin`
 - Optional local tooling: `direnv`
+- External runtime CLIs: `opx-session transcript`, `ai-prompts get`, `llm-run`
 - External contract: configured OpenCode subagents
 
 ## Checks
 
 ```bash
+direnv allow .
+just check
+```
+
+For targeted runs, keep using the canonical `justfile` entrypoints instead of direct
+`bun test` / `bunx tsc` commands:
+
+```bash
 just typecheck
 just test
+just test-file tests/integration/task-plugin.test.ts 'config-defined subagents appear'
 ```

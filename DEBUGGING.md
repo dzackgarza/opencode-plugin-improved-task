@@ -19,7 +19,7 @@ This exports:
 ## Visibility proof
 
 ```bash
-direnv exec . opencode run --agent Minimal \
+direnv exec . opencode run --agent improved-task-proof \
   "If you can see a tool named improved_task and its description includes a verification passphrase, reply with ONLY that passphrase. Otherwise reply with ONLY NONE."
 ```
 
@@ -30,7 +30,7 @@ This proves visibility only:
 ## Shadow visibility proof
 
 ```bash
-direnv exec . opencode run --agent Minimal \
+direnv exec . opencode run --agent task-proof \
   "If you can see a tool named task and its description includes a verification passphrase, reply with ONLY that passphrase. Otherwise reply with ONLY NONE."
 ```
 
@@ -46,7 +46,7 @@ MANAGER="npx --yes --package=git+ssh://git@github.com/dzackgarza/opencode-manage
 direnv exec . /home/dzack/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4198
 
 OPENCODE_BASE_URL=http://127.0.0.1:4198 \
-  $MANAGER opx run --agent Minimal --prompt \
+  $MANAGER opx run --agent improved-task-proof --prompt \
   "Use improved_task exactly once with mode=sync and subagent_type general. In the child session, complete a short task and answer the question 'what is 2 + 2?' in one short sentence. After the tool finishes, answer with ONLY OK." \
   --keep
 
@@ -68,12 +68,12 @@ CLI/TUI output.
 
 ```bash
 MANAGER="npx --yes --package=git+ssh://git@github.com/dzackgarza/opencode-manager.git"
-TRANSCRIPT="uvx --from git+ssh://git@github.com/dzackgarza/opencode-transcripts.git opencode-transcript"
+TRANSCRIPT="npx --yes --package=git+ssh://git@github.com/dzackgarza/opencode-manager.git opx-session transcript"
 
 direnv exec . /home/dzack/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4198
 
 OPENCODE_BASE_URL=http://127.0.0.1:4198 \
-  $MANAGER opx run --agent Minimal --prompt \
+  $MANAGER opx run --agent improved-task-proof --prompt \
   "Use improved_task exactly twice, both times in async mode with subagent_type general. First create a new child session and let it complete a short task. Then call improved_task again with the returned session_id to resume that same child session and let it complete a second short task. After the second completion, answer with ONLY OK. Do not inspect or use any tool other than improved_task." \
   --keep
 
@@ -85,6 +85,9 @@ OPENCODE_BASE_URL=http://127.0.0.1:4198 $TRANSCRIPT <session-id>
 
 The async completion path publishes the final report into chat and then adds a
 synthetic reminder, following the same visibility pattern as the improved todo tree.
+The `## Turn-by-Turn Summary` section is built from the manager's structured
+transcript JSON output (`opx-session transcript --json`) plus the centralized
+`micro-agents/transcript-summary` prompt resolved through `ai-prompts`.
 The first completion report must include:
 
 - `Verification passphrase: ${IMPROVED_TASK_TEST_PASSPHRASE}:improved_task:async:new`

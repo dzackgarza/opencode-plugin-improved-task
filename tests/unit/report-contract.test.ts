@@ -60,7 +60,7 @@ describe("task report helpers", () => {
         timeElapsedMs: 3210,
         tokensUsed: 44,
         numToolCalls: 3,
-        transcriptPath: "/tmp/task-contract.md",
+        transcriptPath: "/tmp/task-contract.json",
         completionConfidenceScore: 0.9,
         finalResultText: "QJ7K2M1R",
         turnSummary: {
@@ -74,6 +74,20 @@ describe("task report helpers", () => {
             web: 0,
             other: 0,
           },
+          narrative: {
+            toolCalls: [
+              {
+                tool: "read",
+                purpose: "Inspect README.md for the requested heading",
+                result: "Confirmed the first heading in the file",
+              },
+            ],
+            reasoningSteps: [
+              "Used the README heading to determine the direct final answer.",
+            ],
+            edits: [],
+            outcome: "Returned the first heading from README.md.",
+          },
         },
       },
       "",
@@ -82,13 +96,17 @@ describe("task report helpers", () => {
     expect(report).toContain('session_id: "ses_summary_contract"');
     expect(report).toContain("tokens_used: 44");
     expect(report).toContain("num_tool_calls: 3");
-    expect(report).toContain('transcript_path: "/tmp/task-contract.md"');
+    expect(report).toContain('transcript_path: "/tmp/task-contract.json"');
     expect(report).toContain('time_elapsed: "3.210s"');
     expect(report).not.toContain("status:");
     expect(report).not.toContain("cost_usd:");
     expect(report).toContain("## Agent's Last Message");
     expect(report).toContain("QJ7K2M1R");
     expect(report).toContain("## Turn-by-Turn Summary");
+    expect(report).toContain("- Tool read:");
+    expect(report).toContain("- Reasoning:");
+    expect(report).toContain("- Outcome:");
+    expect(report).toContain("### Observed Counts");
     expect(report).toContain("- Turns observed: 4");
     expect(report).toContain("- Reasoning parts observed: 2");
     expect(report).toContain("  - delegation: 1");
@@ -99,6 +117,6 @@ describe("task report helpers", () => {
     expect(report).toContain("  - other: 0");
     expect(report).toContain("## Completion Review");
     expect(report).toContain("- Completion confidence score: 0.90");
-    expect(report).toContain("`/tmp/task-contract.md`");
+    expect(report).toContain("`/tmp/task-contract.json`");
   });
 });

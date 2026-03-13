@@ -7,16 +7,13 @@ import { tmpdir as systemTmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const OPENCODE =
-  process.env.OPENCODE_BIN || "/home/dzack/.opencode/bin/opencode";
+const OPENCODE = process.env.OPENCODE_BIN || "opencode";
 const TOOL_DIR = process.cwd();
 const HOST = "127.0.0.1";
-const MANAGER_PACKAGE =
-  "git+ssh://git@github.com/dzackgarza/opencode-manager.git";
+const MANAGER_PACKAGE = join(TOOL_DIR, "..", "opencode-manager");
 const MAX_BUFFER = 8 * 1024 * 1024;
 const SERVER_START_TIMEOUT_MS = 60_000;
 const SESSION_TIMEOUT_MS = 240_000;
-const TEST_PASSPHRASE = process.env.IMPROVED_TASK_TEST_PASSPHRASE ?? "";
 const CUSTOM_CONFIG_AGENT_NAME = "runtime-scout";
 const CUSTOM_CONFIG_AGENT_DESCRIPTION =
   "Synthetic config-defined subagent for runtime visibility verification.";
@@ -42,6 +39,19 @@ type SessionMessage = {
     role?: string;
   };
   parts?: SessionMessagePart[];
+};
+
+type TranscriptArtifactDocument = {
+  sessionID?: string;
+  turns?: Array<{
+    assistantMessages?: Array<{
+      reasoning?: string[];
+      steps?: Array<{
+        contentText?: string;
+      }>;
+      text?: string;
+    }>;
+  }>;
 };
 
 type RuntimeSurface = {
@@ -109,15 +119,52 @@ async function createIsolatedRuntime(cwd: string): Promise<{
   };
 }
 
+async function resolveDirenvEnv(
+  cwdForDirenv: string,
+  env: NodeJS.ProcessEnv,
+): Promise<NodeJS.ProcessEnv> {
+  const result = spawnSync(
+    "direnv",
+    ["exec", cwdForDirenv, "env", "-0"],
+    {
+      cwd: cwdForDirenv,
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: MAX_BUFFER,
+    },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(
+      `Failed to resolve direnv environment for ${cwdForDirenv}.\nSTDOUT:\n${result.stdout ?? ""}\nSTDERR:\n${result.stderr ?? ""}`,
+    );
+  }
+
+  const resolved: NodeJS.ProcessEnv = {};
+  for (const entry of (result.stdout ?? "").split("\0")) {
+    if (!entry) continue;
+    const separator = entry.indexOf("=");
+    if (separator < 0) continue;
+    resolved[entry.slice(0, separator)] = entry.slice(separator + 1);
+  }
+  return resolved;
+}
+
 async function startServer() {
   spawnSync("direnv", ["allow", TOOL_DIR], { cwd: TOOL_DIR, timeout: 30_000 });
 
   serverPort = await findFreePort();
   baseUrl = `http://${HOST}:${serverPort}`;
   const isolated = await createIsolatedRuntime(TOOL_DIR);
+  const resolvedEnv = await resolveDirenvEnv(TOOL_DIR, {
+    ...isolated.runtime.env,
+    OPENCODE_BASE_URL: baseUrl,
+  });
   primaryRuntime = {
     ...isolated.runtime,
     baseUrl,
+    env: resolvedEnv,
   };
   primaryRuntimeCleanup = isolated.cleanup;
   serverLogs = "";
@@ -552,12 +599,26 @@ function parseFrontMatter(report: string) {
 function expectedPassphrase(
   toolName: "improved_task" | "task",
   path: "visible" | "sync:new" | "sync:resume" | "async:new" | "async:resume",
+  runtime: RuntimeSurface = primaryRuntime ?? {
+    baseUrl,
+    cwd: TOOL_DIR,
+    env: process.env,
+  },
 ) {
-  return `Verification passphrase: ${TEST_PASSPHRASE}:${toolName}:${path}`;
+  const passphrase = runtime.env.IMPROVED_TASK_TEST_PASSPHRASE ?? "";
+  return `Verification passphrase: ${passphrase}:${toolName}:${path}`;
 }
 
-function expectedVisiblePassphrase(toolName: "improved_task" | "task") {
-  return `${TEST_PASSPHRASE}:${toolName}:visible`;
+function expectedVisiblePassphrase(
+  toolName: "improved_task" | "task",
+  runtime: RuntimeSurface = primaryRuntime ?? {
+    baseUrl,
+    cwd: TOOL_DIR,
+    env: process.env,
+  },
+) {
+  const passphrase = runtime.env.IMPROVED_TASK_TEST_PASSPHRASE ?? "";
+  return `${passphrase}:${toolName}:visible`;
 }
 
 function reportSessionID(report: string) {
@@ -596,6 +657,33 @@ function lastAssistantText(messages: SessionMessage[]) {
     .join("\n")
     .trim();
   return text.length > 0 ? text : "Subagent completed without a text response.";
+}
+
+function childToolNames(messages: SessionMessage[]) {
+  return new Set(
+    messages
+      .filter((message) => message.info?.role === "assistant")
+      .flatMap((message) => message.parts ?? [])
+      .filter((part) => part.type === "tool" && typeof part.tool === "string")
+      .map((part) => part.tool as string),
+  );
+}
+
+function readTranscriptDocument(path: string): TranscriptArtifactDocument {
+  return JSON.parse(readFileSync(path, "utf8")) as TranscriptArtifactDocument;
+}
+
+function transcriptNarrativeText(document: TranscriptArtifactDocument) {
+  return (document.turns ?? [])
+    .flatMap((turn) => turn.assistantMessages ?? [])
+    .flatMap((message) => [
+      ...(message.reasoning ?? []),
+      ...(message.steps ?? [])
+        .map((step) => step.contentText)
+        .filter((value): value is string => typeof value === "string"),
+      ...(typeof message.text === "string" ? [message.text] : []),
+    ])
+    .join("\n");
 }
 
 async function waitForAssistantText(sessionID: string, timeoutMs = 60_000) {
@@ -705,14 +793,29 @@ function assertSuccessReport(input: {
   expect(body).toContain("  - shell:");
   expect(body).toContain("  - web:");
   expect(body).toContain("  - other:");
+  expect(body).toContain("### Observed Counts");
+  expect(body).toContain("- Outcome:");
   expect(body).toContain("- Completion confidence score:");
   expect(body).toContain("Transcript saved to:");
   expect(input.report).toContain(
     expectedPassphrase(input.toolName, input.expectedPassphrasePath),
   );
 
-  const transcript = readFileSync(transcriptPath, "utf8");
-  expect(transcript).toContain(lastAssistantText(input.childMessages));
+  const actualTools = childToolNames(input.childMessages);
+  if (actualTools.size > 0) {
+    const summarizedTools = body
+      .split("\n")
+      .filter((line) => line.startsWith("- Tool "))
+      .map((line) => line.replace(/^- Tool ([^:]+):.*$/, "$1").trim());
+    expect(summarizedTools.length).toBeGreaterThan(0);
+    expect(summarizedTools.some((tool) => actualTools.has(tool))).toBe(true);
+  }
+
+  const transcript = readTranscriptDocument(transcriptPath);
+  expect(transcript.sessionID).toBe(reportSessionID(input.report));
+  expect(transcriptNarrativeText(transcript)).toContain(
+    lastAssistantText(input.childMessages),
+  );
 
   return metadata;
 }
@@ -768,7 +871,7 @@ function lifecyclePrompt(input: {
     : "";
   return [
     `Use ${input.toolName} exactly once with mode=${input.mode} and subagent_type general${sessionClause}.`,
-    "In the child session, complete a short task and answer the question 'what is 2 + 2?' in one short sentence.",
+    "In the child session, read README.md and answer with its first markdown heading in one short sentence.",
     "After the tool finishes, answer with ONLY OK.",
     `Do not inspect or use any tool other than ${input.toolName}.`,
   ].join(" ");
@@ -861,6 +964,10 @@ async function startWorkspaceServer(runtime: RuntimeSurface) {
   const port = await findFreePort();
   const workspaceBaseUrl = `http://${HOST}:${port}`;
   let workspaceLogs = "";
+  const resolvedEnv = await resolveDirenvEnv(TOOL_DIR, {
+    ...runtime.env,
+    OPENCODE_BASE_URL: workspaceBaseUrl,
+  });
   const child = spawn(
     "direnv",
     [
@@ -878,7 +985,7 @@ async function startWorkspaceServer(runtime: RuntimeSurface) {
     ],
     {
       cwd: runtime.cwd,
-      env: runtime.env,
+      env: resolvedEnv,
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -897,6 +1004,7 @@ async function startWorkspaceServer(runtime: RuntimeSurface) {
         process: child,
         logs: () => workspaceLogs,
         baseUrl: workspaceBaseUrl,
+        env: resolvedEnv,
       };
     }
     if (child.exitCode !== null) {
@@ -948,6 +1056,7 @@ async function expectCustomConfigAgentVisibleAcrossRuntimeSurfaces() {
     workspaceRuntime = {
       ...workspaceRuntime,
       baseUrl: started.baseUrl,
+      env: started.env,
     };
 
     for (const toolName of ["improved_task", "task"] as const) {
