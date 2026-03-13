@@ -41,9 +41,9 @@ This proves visibility of the shadowed name only:
 ## Report contract proof
 
 ```bash
-MANAGER="npx --yes --package=git+ssh://git@github.com/dzackgarza/opencode-manager.git"
+MANAGER="npx --yes --package=git+https://github.com/dzackgarza/opencode-manager.git"
 
-direnv exec . /home/dzack/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4198
+direnv exec . opencode serve --hostname 127.0.0.1 --port 4198
 
 OPENCODE_BASE_URL=http://127.0.0.1:4198 \
   $MANAGER opx run --agent improved-task-proof --prompt \
@@ -67,10 +67,10 @@ Async verification should use a repo-local server plus `opencode-manager`, not r
 CLI/TUI output.
 
 ```bash
-MANAGER="npx --yes --package=git+ssh://git@github.com/dzackgarza/opencode-manager.git"
-TRANSCRIPT="npx --yes --package=git+ssh://git@github.com/dzackgarza/opencode-manager.git opx-session transcript"
+MANAGER="npx --yes --package=git+https://github.com/dzackgarza/opencode-manager.git"
+TRANSCRIPT="npx --yes --package=git+https://github.com/dzackgarza/opencode-manager.git opx-session transcript"
 
-direnv exec . /home/dzack/.opencode/bin/opencode serve --hostname 127.0.0.1 --port 4198
+direnv exec . opencode serve --hostname 127.0.0.1 --port 4198
 
 OPENCODE_BASE_URL=http://127.0.0.1:4198 \
   $MANAGER opx run --agent improved-task-proof --prompt \

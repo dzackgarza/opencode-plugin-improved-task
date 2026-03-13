@@ -17,7 +17,7 @@ const SHADOW_TOOL_NAME = "task";
 const AI_PROMPTS_PACKAGE = "git+https://github.com/dzackgarza/ai-prompts.git";
 const LLM_RUNNER_PACKAGE = "git+https://github.com/dzackgarza/llm-runner.git";
 const OPENCODE_MANAGER_PACKAGE =
-  "git+ssh://git@github.com/dzackgarza/opencode-manager.git";
+  "git+https://github.com/dzackgarza/opencode-manager.git";
 const TRANSCRIPT_SUMMARY_PROMPT_SLUG = "micro-agents/transcript-summary";
 
 const TASK_DESCRIPTION_BASE =
