@@ -28,14 +28,26 @@ At runtime, the plugin appends the available subagent list to the tool descripti
 In test mode, the description carries a visibility passphrase and execution-result
 paths carry distinct result passphrases.
 
-#### Schema
+#### Input
 
-- `description`: string
-- `prompt`: string
-- `subagent_type`: string
-- `mode?`: "sync" | "async"
-- `timeout_ms?`: number
-- `session_id?`: string
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `description` | `string` | Yes | 3–5 word label for this task |
+| `prompt` | `string` | Yes | Full prompt for the subagent |
+| `subagent_type` | `string` | Yes | Name of configured subagent |
+| `mode` | `"sync" \| "async"` | No | `sync` (default) blocks until done; `async` returns immediately |
+| `timeout_ms` | `number` | No | Hard timeout in ms (default 1 800 000 = 30 min) |
+| `session_id` | `string` | No | Resume an existing session instead of creating one |
+
+#### Example Input
+
+```json
+{
+  "description": "Audit auth module",
+  "prompt": "Review src/auth/ for security issues and summarize findings.",
+  "subagent_type": "general-purpose"
+}
+```
 
 ### `task`
 
