@@ -336,6 +336,17 @@ function buildTaskSummaryOutput(
   ], verificationPassphrase).join("\n");
 }
 
+function buildPublishedReportOutput(input: { sessionID: string }): string {
+  return [
+    "---",
+    `session_id: ${JSON.stringify(input.sessionID)}`,
+    "report_published: true",
+    "---",
+    "",
+    "The full subagent results report has been published in chat.",
+  ].join("\n");
+}
+
 function buildAsyncRunningOutput(input: {
   sessionID: string;
   subagentType: string;
@@ -426,6 +437,11 @@ function buildDisplayedReportReminder(): string {
     "Refer to that displayed report instead of reconstructing it unless the user asks for it again.",
     "</system-reminder>",
   ].join("\n");
+}
+
+function extractStructuredSessionID(output: string): string | undefined {
+  const match = output.match(/^session_id:\s*"([^"]+)"$/m);
+  return match?.[1];
 }
 
 async function saveTranscriptFile(sessionID: string): Promise<string> {
@@ -1078,7 +1094,9 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
             sessionID: context.sessionID,
             report,
           });
-          return report;
+          return buildPublishedReportOutput({
+            sessionID: childSession.sessionID,
+          });
         } catch (error) {
           const report = buildTaskFailureOutput({
             sessionID: childSession.sessionID,
@@ -1091,24 +1109,61 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
             sessionID: context.sessionID,
             report,
           });
-          return report;
+          return buildPublishedReportOutput({
+            sessionID: childSession.sessionID,
+          });
         }
       },
     });
 
   return {
-    hook: {
-      async "tool.definition"(
-        { toolID }: { toolID: string },
-        output: { description: string; parameters: unknown },
-      ) {
-        if (toolID !== DIRECT_TOOL_NAME && toolID !== SHADOW_TOOL_NAME) {
-          return;
-        }
+    async "tool.definition"(
+      { toolID }: { toolID: string },
+      output: { description: string; parameters: unknown },
+    ) {
+      if (toolID !== DIRECT_TOOL_NAME && toolID !== SHADOW_TOOL_NAME) {
+        return;
+      }
 
-        const subagents = await fetchSubagents("tool_definition", false);
-        output.description = buildTaskToolDescription(subagents, toolID);
+      const subagents = await fetchSubagents("tool_definition", false);
+      output.description = buildTaskToolDescription(subagents, toolID);
+    },
+    async "tool.execute.after"(
+      {
+        tool,
+        args,
+      }: {
+        tool: string;
+        sessionID: string;
+        callID: string;
+        args: Record<string, unknown>;
       },
+      output: {
+        title: string;
+        output: string;
+        metadata: Record<string, unknown>;
+      },
+    ) {
+      if (tool !== DIRECT_TOOL_NAME && tool !== SHADOW_TOOL_NAME) {
+        return;
+      }
+
+      if (!output.title && typeof args.description === "string") {
+        output.title = args.description;
+      }
+
+      const sessionID =
+        typeof output.metadata?.sessionId === "string"
+          ? (output.metadata.sessionId as string)
+          : extractStructuredSessionID(output.output);
+      if (!sessionID) {
+        return;
+      }
+
+      output.metadata = {
+        ...output.metadata,
+        sessionId: sessionID,
+      };
     },
     tool: {
       [DIRECT_TOOL_NAME]: createTaskTool(DIRECT_TOOL_NAME),

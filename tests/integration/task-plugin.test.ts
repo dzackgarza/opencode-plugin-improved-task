@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
+import { tmpdir as systemTmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const OPENCODE =
   process.env.OPENCODE_BIN || "/home/dzack/.opencode/bin/opencode";
@@ -13,10 +17,17 @@ const MAX_BUFFER = 8 * 1024 * 1024;
 const SERVER_START_TIMEOUT_MS = 60_000;
 const SESSION_TIMEOUT_MS = 240_000;
 const TEST_PASSPHRASE = process.env.IMPROVED_TASK_TEST_PASSPHRASE ?? "";
+const CUSTOM_CONFIG_AGENT_NAME = "runtime-scout";
+const CUSTOM_CONFIG_AGENT_DESCRIPTION =
+  "Synthetic config-defined subagent for runtime visibility verification.";
+const DIRECT_PRIMARY_AGENT_NAME = "improved-task-proof";
+const SHADOW_PRIMARY_AGENT_NAME = "task-proof";
 
 type ToolState = {
   input?: Record<string, unknown>;
   output?: unknown;
+  title?: string;
+  metadata?: Record<string, unknown>;
 };
 
 type SessionMessagePart = {
@@ -33,10 +44,18 @@ type SessionMessage = {
   parts?: SessionMessagePart[];
 };
 
+type RuntimeSurface = {
+  baseUrl: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+};
+
 let baseUrl = "";
 let serverPort = 0;
 let serverProcess: ChildProcess | undefined;
 let serverLogs = "";
+let primaryRuntime: RuntimeSurface | undefined;
+let primaryRuntimeCleanup: (() => Promise<void>) | undefined;
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -65,11 +84,42 @@ async function findFreePort(): Promise<number> {
   });
 }
 
+async function createIsolatedRuntime(cwd: string): Promise<{
+  runtime: RuntimeSurface;
+  cleanup: () => Promise<void>;
+}> {
+  const root = await mkdtemp(join(systemTmpdir(), "improved-task-opencode-"));
+  const configHome = join(root, "config");
+  const testHome = join(root, "home");
+  await mkdir(configHome, { recursive: true });
+  await mkdir(testHome, { recursive: true });
+  return {
+    runtime: {
+      baseUrl: "",
+      cwd,
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: configHome,
+        OPENCODE_TEST_HOME: testHome,
+      },
+    },
+    cleanup: async () => {
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
 async function startServer() {
   spawnSync("direnv", ["allow", TOOL_DIR], { cwd: TOOL_DIR, timeout: 30_000 });
 
   serverPort = await findFreePort();
   baseUrl = `http://${HOST}:${serverPort}`;
+  const isolated = await createIsolatedRuntime(TOOL_DIR);
+  primaryRuntime = {
+    ...isolated.runtime,
+    baseUrl,
+  };
+  primaryRuntimeCleanup = isolated.cleanup;
   serverLogs = "";
   serverProcess = spawn(
     "direnv",
@@ -88,7 +138,7 @@ async function startServer() {
     ],
     {
       cwd: TOOL_DIR,
-      env: process.env,
+      env: primaryRuntime.env,
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -120,27 +170,49 @@ async function startServer() {
 }
 
 async function stopServer() {
-  if (!serverProcess || serverProcess.exitCode !== null) return;
+  try {
+    if (!serverProcess || serverProcess.exitCode !== null) return;
 
-  serverProcess.kill("SIGINT");
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (serverProcess.exitCode !== null) return;
-    await wait(100);
+    serverProcess.kill("SIGINT");
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (serverProcess.exitCode !== null) return;
+      await wait(100);
+    }
+
+    serverProcess.kill("SIGKILL");
+  } finally {
+    await primaryRuntimeCleanup?.();
+    primaryRuntimeCleanup = undefined;
+    primaryRuntime = undefined;
   }
-
-  serverProcess.kill("SIGKILL");
 }
 
 function runManager(command: "opx", args: string[]) {
+  return runManagerAt(
+    primaryRuntime ?? {
+      baseUrl,
+      cwd: TOOL_DIR,
+      env: process.env,
+    },
+    command,
+    args,
+  );
+}
+
+function runManagerAt(
+  runtime: RuntimeSurface,
+  command: "opx",
+  args: string[],
+) {
   const result = spawnSync(
     "npx",
     ["--yes", `--package=${MANAGER_PACKAGE}`, command, ...args],
     {
-      cwd: TOOL_DIR,
+      cwd: runtime.cwd,
       env: {
-        ...process.env,
-        OPENCODE_BASE_URL: baseUrl,
+        ...runtime.env,
+        OPENCODE_BASE_URL: runtime.baseUrl,
       },
       encoding: "utf8",
       timeout: SESSION_TIMEOUT_MS,
@@ -171,11 +243,33 @@ function parseKeptSessionID(stderr: string) {
   return match[1];
 }
 
-function runPrompt(prompt: string, lingerSeconds = 0) {
-  return runManager("opx", [
+function runPrompt(
+  prompt: string,
+  lingerSeconds = 0,
+  agentName = DIRECT_PRIMARY_AGENT_NAME,
+) {
+  return runPromptAt(
+    primaryRuntime ?? {
+      baseUrl,
+      cwd: TOOL_DIR,
+      env: process.env,
+    },
+    agentName,
+    prompt,
+    lingerSeconds,
+  );
+}
+
+function runPromptAt(
+  runtime: RuntimeSurface,
+  agentName: string,
+  prompt: string,
+  lingerSeconds = 0,
+) {
+  return runManagerAt(runtime, "opx", [
     "run",
     "--agent",
-    "Minimal",
+    agentName,
     "--prompt",
     prompt,
     "--keep",
@@ -184,13 +278,38 @@ function runPrompt(prompt: string, lingerSeconds = 0) {
   ]);
 }
 
-function resumePrompt(sessionID: string, prompt: string, lingerSeconds = 0) {
-  return runManager("opx", [
+function resumePrompt(
+  sessionID: string,
+  prompt: string,
+  lingerSeconds = 0,
+  agentName = DIRECT_PRIMARY_AGENT_NAME,
+) {
+  return resumePromptAt(
+    primaryRuntime ?? {
+      baseUrl,
+      cwd: TOOL_DIR,
+      env: process.env,
+    },
+    agentName,
+    sessionID,
+    prompt,
+    lingerSeconds,
+  );
+}
+
+function resumePromptAt(
+  runtime: RuntimeSurface,
+  agentName: string,
+  sessionID: string,
+  prompt: string,
+  lingerSeconds = 0,
+) {
+  return runManagerAt(runtime, "opx", [
     "resume",
     "--session",
     sessionID,
     "--agent",
-    "Minimal",
+    agentName,
     "--prompt",
     prompt,
     "--keep",
@@ -200,16 +319,44 @@ function resumePrompt(sessionID: string, prompt: string, lingerSeconds = 0) {
 }
 
 function safeDeleteSession(sessionID: string | undefined) {
+  return safeDeleteSessionAt(
+    primaryRuntime ?? {
+      baseUrl,
+      cwd: TOOL_DIR,
+      env: process.env,
+    },
+    sessionID,
+  );
+}
+
+function safeDeleteSessionAt(
+  runtime: RuntimeSurface,
+  sessionID: string | undefined,
+) {
   if (!sessionID) return;
   try {
-    runManager("opx", ["session", "delete", "--session", sessionID]);
+    runManagerAt(runtime, "opx", ["session", "delete", "--session", sessionID]);
   } catch {
     // best-effort cleanup in a noisy shared environment
   }
 }
 
 function readMessages(sessionID: string): SessionMessage[] {
-  const { stdout } = runManager("opx", [
+  return readMessagesAt(
+    primaryRuntime ?? {
+      baseUrl,
+      cwd: TOOL_DIR,
+      env: process.env,
+    },
+    sessionID,
+  );
+}
+
+function readMessagesAt(
+  runtime: RuntimeSurface,
+  sessionID: string,
+): SessionMessage[] {
+  const { stdout } = runManagerAt(runtime, "opx", [
     "session",
     "messages",
     "--session",
@@ -218,21 +365,49 @@ function readMessages(sessionID: string): SessionMessage[] {
   return JSON.parse(stdout) as SessionMessage[];
 }
 
-function executionToolNames(toolName: "improved_task" | "task") {
+function runOpencodeAt(runtime: RuntimeSurface, args: string[]) {
+  const result = spawnSync(
+    "direnv",
+    ["exec", TOOL_DIR, OPENCODE, ...args],
+    {
+      cwd: runtime.cwd,
+      env: runtime.env,
+      encoding: "utf8",
+      timeout: SESSION_TIMEOUT_MS,
+      maxBuffer: MAX_BUFFER,
+    },
+  );
+
+  if (result.error) throw result.error;
+
+  const stdout = result.stdout ?? "";
+  const stderr = result.stderr ?? "";
+  if (result.status !== 0) {
+    throw new Error(
+      `OpenCode command failed: ${args.join(" ")}\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`,
+    );
+  }
+
+  return {
+    stdout,
+    stderr,
+  };
+}
+
+function executionAgentName(toolName: "improved_task" | "task") {
   return toolName === "task"
-    ? new Set(["task", "improved_task"])
-    : new Set(["improved_task"]);
+    ? SHADOW_PRIMARY_AGENT_NAME
+    : DIRECT_PRIMARY_AGENT_NAME;
 }
 
 function toolParts(
   messages: SessionMessage[],
   toolName: "improved_task" | "task",
 ) {
-  const toolNames = executionToolNames(toolName);
   return messages
     .filter((message) => message.info?.role === "assistant")
     .flatMap((message) => message.parts ?? [])
-    .filter((part) => part.type === "tool" && toolNames.has(part.tool ?? ""));
+    .filter((part) => part.type === "tool" && part.tool === toolName);
 }
 
 function toolOutputs(
@@ -244,7 +419,7 @@ function toolOutputs(
     .filter((output): output is string => typeof output === "string");
 }
 
-function callbackReports(messages: SessionMessage[]) {
+function publishedReports(messages: SessionMessage[]) {
   return messages
     .filter((message) => message.info?.role === "user")
     .flatMap((message) => message.parts ?? [])
@@ -289,7 +464,7 @@ async function waitForToolOutputCount(
   );
 }
 
-async function waitForCallbackReportCount(
+async function waitForPublishedReportCount(
   sessionID: string,
   expectedCount: number,
   timeoutMs = 180_000,
@@ -298,7 +473,7 @@ async function waitForCallbackReportCount(
 
   while (Date.now() < deadline) {
     const messages = readMessages(sessionID);
-    const reports = callbackReports(messages);
+    const reports = publishedReports(messages);
     if (reports.length >= expectedCount) {
       return { messages, reports };
     }
@@ -376,9 +551,13 @@ function parseFrontMatter(report: string) {
 
 function expectedPassphrase(
   toolName: "improved_task" | "task",
-  path: "sync:new" | "sync:resume" | "async:new" | "async:resume",
+  path: "visible" | "sync:new" | "sync:resume" | "async:new" | "async:resume",
 ) {
   return `Verification passphrase: ${TEST_PASSPHRASE}:${toolName}:${path}`;
+}
+
+function expectedVisiblePassphrase(toolName: "improved_task" | "task") {
+  return `${TEST_PASSPHRASE}:${toolName}:visible`;
 }
 
 function reportSessionID(report: string) {
@@ -417,6 +596,43 @@ function lastAssistantText(messages: SessionMessage[]) {
     .join("\n")
     .trim();
   return text.length > 0 ? text : "Subagent completed without a text response.";
+}
+
+async function waitForAssistantText(sessionID: string, timeoutMs = 60_000) {
+  return waitForAssistantTextAt(
+    primaryRuntime ?? {
+      baseUrl,
+      cwd: TOOL_DIR,
+      env: process.env,
+    },
+    sessionID,
+    timeoutMs,
+  );
+}
+
+async function waitForAssistantTextAt(
+  runtime: RuntimeSurface,
+  sessionID: string,
+  timeoutMs = 60_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const messages = readMessagesAt(runtime, sessionID);
+    const assistantMessages = messages.filter((message) => {
+      return message.info?.role === "assistant";
+    });
+    const text = lastAssistantText(messages);
+    if (assistantMessages.length > 0 && text !== "Subagent completed without a text response.") {
+      return text;
+    }
+    await wait(1_000);
+  }
+
+  const messages = readMessagesAt(runtime, sessionID);
+  throw new Error(
+    `Timed out waiting for assistant text.\n${JSON.stringify(messages, null, 2)}`,
+  );
 }
 
 function assertHeaderOrder(body: string, headers: string[]) {
@@ -516,6 +732,32 @@ function assertRunningNotice(input: {
   return metadata.session_id as string;
 }
 
+function assertPublishedReportNotice(input: {
+  output: string;
+  expectedSessionID?: string;
+}) {
+  const { metadata, body } = parseFrontMatter(input.output);
+
+  expect(metadata.report_published).toBe("true");
+  expect(typeof metadata.session_id).toBe("string");
+  if (input.expectedSessionID) {
+    expect(metadata.session_id).toBe(input.expectedSessionID);
+  }
+  expect(body).toBe("The full subagent results report has been published in chat.");
+  expect(input.output).not.toContain("## Completion Review");
+  return metadata.session_id as string;
+}
+
+function assertTaskDisplayMetadata(
+  part: SessionMessagePart | undefined,
+  expectedSessionID: string,
+) {
+  expect(part?.state?.title).toBe(part?.state?.input?.description);
+  expect(part?.state?.metadata).toMatchObject({
+    sessionId: expectedSessionID,
+  });
+}
+
 function lifecyclePrompt(input: {
   toolName: "improved_task" | "task";
   mode: "sync" | "async";
@@ -532,6 +774,215 @@ function lifecyclePrompt(input: {
   ].join(" ");
 }
 
+function visibilityPassphrasePrompt(
+  toolName: "improved_task" | "task",
+  missingSentinel = "NO_VISIBLE_PASSPHRASE",
+) {
+  return [
+    `Reply with EXACTLY either the verification passphrase from the ${toolName} tool description,`,
+    `or the exact string "${missingSentinel}" if no such line exists.`,
+    `Do not call ${toolName} or any other tool.`,
+    "Do not add quotes, code fences, or extra text.",
+  ].join(" ");
+}
+
+function schemaAgentLinePrompt(
+  toolName: "improved_task" | "task",
+  agentName = "general",
+  missingSentinel = "NO_AGENT",
+) {
+  return [
+    `Reply with EXACTLY either the line that starts with "- ${agentName}:" from the ${toolName} tool description,`,
+    `or the exact string "${missingSentinel}" if no such line exists.`,
+    `Do not call ${toolName} or any other tool.`,
+    "Do not add quotes, code fences, or extra text.",
+  ].join(" ");
+}
+
+async function expectToolVisibilityPassphrase(toolName: "improved_task" | "task") {
+  let sessionID: string | undefined;
+
+  try {
+    const run = runPrompt(
+      visibilityPassphrasePrompt(toolName),
+      0,
+      executionAgentName(toolName),
+    );
+    sessionID = parseKeptSessionID(run.stderr);
+
+    const response = await waitForAssistantText(sessionID);
+
+    expect(response).not.toBe("NO_VISIBLE_PASSPHRASE");
+    expect(response).toBe(expectedVisiblePassphrase(toolName));
+  } finally {
+    safeDeleteSession(sessionID);
+  }
+}
+
+async function createCustomConfigWorkspace() {
+  const cwd = await mkdtemp(join(systemTmpdir(), "improved-task-runtime-"));
+  await mkdir(join(cwd, ".opencode", "plugin"), { recursive: true });
+  await writeFile(
+    join(cwd, "opencode.json"),
+    `${JSON.stringify(
+      {
+        $schema: "https://opencode.ai/config.json",
+        agent: {
+          [CUSTOM_CONFIG_AGENT_NAME]: {
+            description: CUSTOM_CONFIG_AGENT_DESCRIPTION,
+            mode: "subagent",
+            prompt: "You are a synthetic runtime-only subagent used for integration tests.",
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  await writeFile(
+    join(cwd, ".opencode", "plugin", "improved-task.ts"),
+    [
+      "export { ImprovedTaskPlugin as default } from",
+      `${JSON.stringify(pathToFileURL(join(TOOL_DIR, "src/index.ts")).href)};`,
+      "",
+    ].join(" "),
+    "utf8",
+  );
+  return {
+    cwd,
+    [Symbol.asyncDispose]: async () => {
+      await rm(cwd, { recursive: true, force: true });
+    },
+  };
+}
+
+async function startWorkspaceServer(runtime: RuntimeSurface) {
+  const port = await findFreePort();
+  const workspaceBaseUrl = `http://${HOST}:${port}`;
+  let workspaceLogs = "";
+  const child = spawn(
+    "direnv",
+    [
+      "exec",
+      TOOL_DIR,
+      OPENCODE,
+      "serve",
+      "--hostname",
+      HOST,
+      "--port",
+      String(port),
+      "--print-logs",
+      "--log-level",
+      "INFO",
+    ],
+    {
+      cwd: runtime.cwd,
+      env: runtime.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  const ready = `opencode server listening on ${workspaceBaseUrl}`;
+  const deadline = Date.now() + SERVER_START_TIMEOUT_MS;
+  const capture = (chunk: Buffer | string) => {
+    workspaceLogs += chunk.toString();
+  };
+  child.stdout.on("data", capture);
+  child.stderr.on("data", capture);
+
+  while (Date.now() < deadline) {
+    if (workspaceLogs.includes(ready)) {
+      return {
+        process: child,
+        logs: () => workspaceLogs,
+        baseUrl: workspaceBaseUrl,
+      };
+    }
+    if (child.exitCode !== null) {
+      throw new Error(
+        `Workspace OpenCode server exited early (${child.exitCode}).\n${workspaceLogs}`,
+      );
+    }
+    await wait(200);
+  }
+
+  throw new Error(
+    `Timed out waiting for workspace OpenCode server at ${workspaceBaseUrl}.\n${workspaceLogs}`,
+  );
+}
+
+async function stopWorkspaceServer(process: ChildProcess | undefined) {
+  if (!process || process.exitCode !== null) return;
+
+  process.kill("SIGINT");
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (process.exitCode !== null) return;
+    await wait(100);
+  }
+
+  process.kill("SIGKILL");
+}
+
+async function expectCustomConfigAgentVisibleAcrossRuntimeSurfaces() {
+  await using workspace = await createCustomConfigWorkspace();
+  let sessionID: string | undefined;
+  let workspaceProcess: ChildProcess | undefined;
+  let workspaceRuntime: RuntimeSurface | undefined;
+  let cleanupWorkspaceRuntime: (() => Promise<void>) | undefined;
+
+  try {
+    const isolated = await createIsolatedRuntime(workspace.cwd);
+    cleanupWorkspaceRuntime = isolated.cleanup;
+    workspaceRuntime = isolated.runtime;
+
+    const listed = runOpencodeAt(
+      workspaceRuntime,
+      ["agent", "list"],
+    );
+    expect(listed.stdout).toContain(`${CUSTOM_CONFIG_AGENT_NAME} (subagent)`);
+
+    const started = await startWorkspaceServer(workspaceRuntime);
+    workspaceProcess = started.process;
+    workspaceRuntime = {
+      ...workspaceRuntime,
+      baseUrl: started.baseUrl,
+    };
+
+    for (const toolName of ["improved_task", "task"] as const) {
+      const run = runPromptAt(
+        workspaceRuntime,
+        "build",
+        schemaAgentLinePrompt(
+          toolName,
+          CUSTOM_CONFIG_AGENT_NAME,
+          "NO_CUSTOM_CONFIG_AGENT",
+        ),
+      );
+      sessionID = parseKeptSessionID(run.stderr);
+
+      const response = await waitForAssistantTextAt(
+        workspaceRuntime,
+        sessionID,
+      );
+
+      expect(response).not.toBe("NO_CUSTOM_CONFIG_AGENT");
+      expect(response).toContain(`- ${CUSTOM_CONFIG_AGENT_NAME}:`);
+      expect(response).toContain(CUSTOM_CONFIG_AGENT_DESCRIPTION);
+
+      safeDeleteSessionAt(workspaceRuntime, sessionID);
+      sessionID = undefined;
+    }
+  } finally {
+    if (workspaceRuntime) {
+      safeDeleteSessionAt(workspaceRuntime, sessionID);
+    }
+    await stopWorkspaceServer(workspaceProcess);
+    await cleanupWorkspaceRuntime?.();
+  }
+}
+
 async function expectSyncLifecycleReport(toolName: "improved_task" | "task") {
   let parentSessionID: string | undefined;
   let childSessionID: string | undefined;
@@ -542,19 +993,28 @@ async function expectSyncLifecycleReport(toolName: "improved_task" | "task") {
         toolName,
         mode: "sync",
       }),
+      0,
+      executionAgentName(toolName),
     );
     parentSessionID = parseKeptSessionID(firstRun.stderr);
 
     const firstResult = await waitForToolOutputCount(parentSessionID, toolName, 1);
-    childSessionID = reportSessionID(firstResult.outputs[0]);
+    const firstPublished = await waitForPublishedReportCount(parentSessionID, 1);
+    childSessionID = reportSessionID(firstPublished.reports[0]);
+    assertPublishedReportNotice({
+      output: firstResult.outputs[0],
+      expectedSessionID: childSessionID,
+    });
+    assertTaskDisplayMetadata(
+      toolParts(firstResult.messages, toolName)[0],
+      childSessionID,
+    );
     const firstMetadata = assertSuccessReport({
-      report: firstResult.outputs[0],
+      report: firstPublished.reports[0],
       childMessages: readMessages(childSessionID),
       expectedPassphrasePath: "sync:new",
       toolName,
     });
-    const firstPublished = await waitForCallbackReportCount(parentSessionID, 1);
-    expect(firstPublished.reports[0]).toBe(firstResult.outputs[0]);
     const firstReminder = await waitForReminderCount(parentSessionID, 1);
     expect(firstReminder.reminders[0]).toContain(
       "The subagent results report has already been displayed in chat.",
@@ -568,19 +1028,28 @@ async function expectSyncLifecycleReport(toolName: "improved_task" | "task") {
         mode: "sync",
         sessionID: childSessionID,
       }),
+      0,
+      executionAgentName(toolName),
     );
 
     const secondResult = await waitForToolOutputCount(parentSessionID, toolName, 2);
+    const secondPublished = await waitForPublishedReportCount(parentSessionID, 2);
+    assertPublishedReportNotice({
+      output: secondResult.outputs[1],
+      expectedSessionID: childSessionID,
+    });
+    assertTaskDisplayMetadata(
+      toolParts(secondResult.messages, toolName)[1],
+      childSessionID,
+    );
     const secondChildMessages = readMessages(childSessionID);
     assertSuccessReport({
-      report: secondResult.outputs[1],
+      report: secondPublished.reports[1],
       childMessages: secondChildMessages,
       expectedSessionID: childSessionID,
       expectedPassphrasePath: "sync:resume",
       toolName,
     });
-    const secondPublished = await waitForCallbackReportCount(parentSessionID, 2);
-    expect(secondPublished.reports[1]).toBe(secondResult.outputs[1]);
     const secondReminder = await waitForReminderCount(parentSessionID, 2);
     expect(secondReminder.reminders[1]).toContain(
       "The subagent results report has already been displayed in chat.",
@@ -602,6 +1071,7 @@ async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
         mode: "async",
       }),
       30,
+      executionAgentName(toolName),
     );
     parentSessionID = parseKeptSessionID(firstRun.stderr);
 
@@ -613,8 +1083,12 @@ async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
     childSessionID = assertRunningNotice({
       report: firstToolResult.outputs[0],
     });
+    assertTaskDisplayMetadata(
+      toolParts(firstToolResult.messages, toolName)[0],
+      childSessionID,
+    );
 
-    const firstCallback = await waitForCallbackReportCount(parentSessionID, 1);
+    const firstCallback = await waitForPublishedReportCount(parentSessionID, 1);
     assertSuccessReport({
       report: firstCallback.reports[0],
       childMessages: readMessages(childSessionID),
@@ -635,6 +1109,7 @@ async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
         sessionID: childSessionID,
       }),
       30,
+      executionAgentName(toolName),
     );
 
     const secondToolResult = await waitForToolOutputCount(
@@ -646,8 +1121,12 @@ async function expectAsyncLifecycleReport(toolName: "improved_task" | "task") {
       report: secondToolResult.outputs[1],
       expectedSessionID: childSessionID,
     });
+    assertTaskDisplayMetadata(
+      toolParts(secondToolResult.messages, toolName)[1],
+      childSessionID,
+    );
 
-    const secondCallback = await waitForCallbackReportCount(parentSessionID, 2);
+    const secondCallback = await waitForPublishedReportCount(parentSessionID, 2);
     assertSuccessReport({
       report: secondCallback.reports[1],
       childMessages: readMessages(childSessionID),
@@ -677,16 +1156,25 @@ async function expectInvalidSessionFallback() {
         mode: "sync",
         sessionID: invalidSessionID,
       }),
+      0,
+      executionAgentName("improved_task"),
     );
     parentSessionID = parseKeptSessionID(run.stderr);
 
     const result = await waitForToolOutputCount(parentSessionID, "improved_task", 1);
+    const published = await waitForPublishedReportCount(parentSessionID, 1);
     const firstToolPart = toolParts(result.messages, "improved_task")[0];
     expect(firstToolPart.state?.input?.session_id).toBe(invalidSessionID);
+    childSessionID = reportSessionID(published.reports[0]);
+    assertPublishedReportNotice({
+      output: result.outputs[0],
+      expectedSessionID: childSessionID,
+    });
+    assertTaskDisplayMetadata(firstToolPart, childSessionID);
 
     const metadata = assertSuccessReport({
-      report: result.outputs[0],
-      childMessages: readMessages(reportSessionID(result.outputs[0])),
+      report: published.reports[0],
+      childMessages: readMessages(childSessionID),
       expectedPassphrasePath: "sync:new",
       toolName: "improved_task",
     });
@@ -707,6 +1195,18 @@ afterAll(async () => {
 }, 15_000);
 
 describe("improved-task live report contract", () => {
+  it("proves config-defined subagents appear in opencode agent list and plugin schemas", async () => {
+    await expectCustomConfigAgentVisibleAcrossRuntimeSurfaces();
+  }, 180_000);
+
+  it("proves improved_task visibility via the tool-description passphrase", async () => {
+    await expectToolVisibilityPassphrase("improved_task");
+  }, 120_000);
+
+  it("proves task visibility via the tool-description passphrase", async () => {
+    await expectToolVisibilityPassphrase("task");
+  }, 120_000);
+
   it("proves improved_task sync report contract and resume", async () => {
     await expectSyncLifecycleReport("improved_task");
   }, 220_000);

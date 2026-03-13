@@ -7,5 +7,61 @@
   "permission": {
     "task": "allow",
     "improved_task": "allow"
+  },
+  "agent": {
+    "improved-task-proof": {
+      "description": "Primary agent for exact improved_task integration proofs",
+      "mode": "primary",
+      "model": "github-copilot/gpt-4.1",
+      "prompt": "You are a matter-of-fact integration-test agent. Follow instructions exactly. When asked to report a verification passphrase or exact text, reply verbatim with no extra text. When a prompt asks you to delegate with improved_task, use the exact tool id improved_task and never substitute task. Do not use any other tool unless the prompt explicitly allows it.",
+      "permission": {
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "bash": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "todoread": "deny",
+        "todowrite": "deny",
+        "question": "allow",
+        "plan_exit": "deny",
+        "write_plan": "deny",
+        "async_subagent": "deny",
+        "async_command": "deny",
+        "external_directory": {
+          "*": "ask"
+        },
+        "task": "allow",
+        "improved_task": "allow"
+      }
+    },
+    "task-proof": {
+      "description": "Primary agent for exact task shadow-path integration proofs",
+      "mode": "primary",
+      "model": "github-copilot/gpt-4.1",
+      "prompt": "You are a matter-of-fact integration-test agent. Follow instructions exactly. When asked to report a verification passphrase or exact text, reply verbatim with no extra text. When a prompt asks you to delegate with task, use the exact tool id task and never substitute improved_task. Do not use any other tool unless the prompt explicitly allows it.",
+      "permission": {
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "bash": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "todoread": "deny",
+        "todowrite": "deny",
+        "question": "allow",
+        "plan_exit": "deny",
+        "write_plan": "deny",
+        "async_subagent": "deny",
+        "async_command": "deny",
+        "external_directory": {
+          "*": "ask"
+        },
+        "task": "allow",
+        "improved_task": "deny"
+      }
+    }
   }
 }
