@@ -1,3 +1,4 @@
+set fallback := true
 repo_root := justfile_directory()
 
 justfile-hygiene:

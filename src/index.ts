@@ -1,27 +1,27 @@
-import { type Plugin, tool } from "@opencode-ai/plugin";
-import { promisify } from "node:util";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { promises as fs } from "node:fs";
-import { execFile } from "node:child_process";
-import pkg from "../package.json" assert { type: "json" };
+import { type Plugin, tool } from '@opencode-ai/plugin';
+import { promisify } from 'node:util';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { promises as fs } from 'node:fs';
+import { execFile } from 'node:child_process';
+import pkg from '../package.json' assert { type: 'json' };
 
 const execFileAsync = promisify(execFile);
 const PLUGIN_VERSION = pkg.version;
 
 const DEFAULT_SUBAGENT_DESCRIPTION =
-  "This subagent should only be called manually by the user.";
-const IMPROVED_TASK_TEST_PASSPHRASE_ENV = "IMPROVED_TASK_TEST_PASSPHRASE";
-const DIRECT_TOOL_NAME = "improved_task";
-const SHADOW_TOOL_NAME = "task";
-const AI_PROMPTS_PACKAGE = "git+https://github.com/dzackgarza/ai-prompts.git";
-const LLM_RUNNER_PACKAGE = "git+https://github.com/dzackgarza/llm-runner.git";
+  'This subagent should only be called manually by the user.';
+const IMPROVED_TASK_TEST_PASSPHRASE_ENV = 'IMPROVED_TASK_TEST_PASSPHRASE';
+const DIRECT_TOOL_NAME = 'improved_task';
+const SHADOW_TOOL_NAME = 'task';
+const AI_PROMPTS_PACKAGE = 'git+https://github.com/dzackgarza/ai-prompts.git';
+const LLM_RUNNER_PACKAGE = 'git+https://github.com/dzackgarza/llm-runner.git';
 const OPENCODE_MANAGER_PACKAGE =
-  "git+https://github.com/dzackgarza/opencode-manager.git";
-const TRANSCRIPT_SUMMARY_PROMPT_SLUG = "micro-agents/transcript-summary";
+  'git+https://github.com/dzackgarza/opencode-manager.git';
+const TRANSCRIPT_SUMMARY_PROMPT_SLUG = 'micro-agents/transcript-summary';
 
 const TASK_DESCRIPTION_BASE =
-  "Use when you need a specialized subagent to handle scoped work and return a result. Delegate work to a subagent using native task lifecycle semantics.";
+  'Use when you need a specialized subagent to handle scoped work and return a result. Delegate work to a subagent using native task lifecycle semantics.';
 const AGENT_FETCH_TIMEOUT_MS = 3000;
 const SUBAGENT_CACHE_TTL_MS = 60_000;
 const ASYNC_HEARTBEAT_INTERVAL_MS = 15_000;
@@ -67,12 +67,12 @@ type SessionMessage = {
 };
 
 const TOOL_USE_TYPES = [
-  "delegation",
-  "filesystem",
-  "memory",
-  "shell",
-  "web",
-  "other",
+  'delegation',
+  'filesystem',
+  'memory',
+  'shell',
+  'web',
+  'other',
 ] as const;
 
 type ToolUseType = (typeof TOOL_USE_TYPES)[number];
@@ -127,20 +127,20 @@ type TaskFailureSummary = {
 
 type TaskTerminalResult =
   | {
-      kind: "success";
+      kind: 'success';
       summary: TaskSuccessSummary;
     }
   | {
-      kind: "failure";
+      kind: 'failure';
       failure: TaskFailureSummary;
     };
 
 type VerificationPath =
-  | "visible"
-  | "sync:new"
-  | "sync:resume"
-  | "async:new"
-  | "async:resume";
+  | 'visible'
+  | 'sync:new'
+  | 'sync:resume'
+  | 'async:new'
+  | 'async:resume';
 
 type AiPromptEntry = {
   text?: string;
@@ -213,7 +213,7 @@ type TranscriptArtifact = {
 class TaskTimeoutError extends Error {
   constructor(label: string, timeoutMs: number) {
     super(`${label} timed out after ${timeoutMs}ms`);
-    this.name = "TaskTimeoutError";
+    this.name = 'TaskTimeoutError';
   }
 }
 
@@ -223,7 +223,7 @@ function timeoutSeconds(timeoutMs: number): number {
 
 function formatSubagentList(subagents: CachedSubagent[]): string {
   if (subagents.length === 0) {
-    return "- (No subagents currently discoverable via client.app.agents())";
+    return '- (No subagents currently discoverable via client.app.agents())';
   }
 
   return subagents
@@ -231,12 +231,12 @@ function formatSubagentList(subagents: CachedSubagent[]): string {
       (subagent) =>
         `- ${subagent.name}: ${subagent.description ?? DEFAULT_SUBAGENT_DESCRIPTION}`,
     )
-    .join("\n");
+    .join('\n');
 }
 
 function buildPassphrase(toolName: string, path: VerificationPath): string {
-  const seed = process.env[IMPROVED_TASK_TEST_PASSPHRASE_ENV]?.trim() ?? "";
-  if (!seed) return "";
+  const seed = process.env[IMPROVED_TASK_TEST_PASSPHRASE_ENV]?.trim() ?? '';
+  if (!seed) return '';
   return `${seed}:${toolName}:${path}`;
 }
 
@@ -246,15 +246,15 @@ function buildTaskToolDescription(
 ): string {
   const lines = [
     `${TASK_DESCRIPTION_BASE} (Plugin version: ${PLUGIN_VERSION})`,
-    "",
-    "Available subagent types and descriptions:",
+    '',
+    'Available subagent types and descriptions:',
     formatSubagentList(subagents),
   ];
-  const verificationPassphrase = buildPassphrase(toolName, "visible");
+  const verificationPassphrase = buildPassphrase(toolName, 'visible');
   if (verificationPassphrase) {
-    lines.push("", `Verification passphrase: ${verificationPassphrase}`);
+    lines.push('', `Verification passphrase: ${verificationPassphrase}`);
   }
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 function appendVerificationPassphrase(
@@ -262,16 +262,14 @@ function appendVerificationPassphrase(
   verificationPassphrase: string,
 ): string[] {
   if (!verificationPassphrase) return lines;
-  return [...lines, "", `Verification passphrase: ${verificationPassphrase}`];
+  return [...lines, '', `Verification passphrase: ${verificationPassphrase}`];
 }
 
-function extractText(
-  parts: Array<{ type?: string; text?: string }>,
-): string {
+function extractText(parts: Array<{ type?: string; text?: string }>): string {
   return parts
-    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .filter((part) => part.type === 'text' && typeof part.text === 'string')
     .map((part) => part.text as string)
-    .join("")
+    .join('')
     .trim();
 }
 
@@ -295,41 +293,38 @@ function emptyTranscriptNarrativeSummary(): TranscriptNarrativeSummary {
     toolCalls: [],
     reasoningSteps: [],
     edits: [],
-    outcome: "Subagent completed without a transcript-derived narrative outcome.",
+    outcome: 'Subagent completed without a transcript-derived narrative outcome.',
   };
 }
 
 function classifyToolUse(toolName: string | undefined): ToolUseType {
-  const normalized = toolName?.trim().toLowerCase() ?? "";
-  if (!normalized) return "other";
-  if (normalized === "task" || normalized === "improved_task") {
-    return "delegation";
+  const normalized = toolName?.trim().toLowerCase() ?? '';
+  if (!normalized) return 'other';
+  if (normalized === 'task' || normalized === 'improved_task') {
+    return 'delegation';
   }
   if (
-    normalized.includes("bash") ||
-    normalized.includes("shell") ||
-    normalized.includes("command")
+    normalized.includes('bash') ||
+    normalized.includes('shell') ||
+    normalized.includes('command')
   ) {
-    return "shell";
+    return 'shell';
   }
   if (
-    normalized.includes("read") ||
-    normalized.includes("write") ||
-    normalized.includes("edit") ||
-    normalized.includes("list") ||
-    normalized.includes("glob") ||
-    normalized.includes("grep")
+    normalized.includes('read') ||
+    normalized.includes('write') ||
+    normalized.includes('edit') ||
+    normalized.includes('list') ||
+    normalized.includes('glob') ||
+    normalized.includes('grep')
   ) {
-    return "filesystem";
+    return 'filesystem';
   }
-  if (
-    normalized.includes("memory") ||
-    normalized.includes("memories")
-  ) {
-    return "memory";
+  if (normalized.includes('memory') || normalized.includes('memories')) {
+    return 'memory';
   }
-  if (normalized.includes("web") || normalized.includes("search")) return "web";
-  return "other";
+  if (normalized.includes('web') || normalized.includes('search')) return 'web';
+  return 'other';
 }
 
 function summarizeSessionMessages(messages: SessionMessage[]): {
@@ -343,22 +338,21 @@ function summarizeSessionMessages(messages: SessionMessage[]): {
   let reasoningPartCount = 0;
 
   for (const message of messages) {
-    if (message.info?.role === "assistant") {
+    if (message.info?.role === 'assistant') {
       const total = message.info.tokens?.total;
       tokensUsed +=
-        typeof total === "number"
+        typeof total === 'number'
           ? total
-          : (message.info.tokens?.input ?? 0) +
-            (message.info.tokens?.output ?? 0);
+          : (message.info.tokens?.input ?? 0) + (message.info.tokens?.output ?? 0);
     }
 
     for (const part of message.parts ?? []) {
-      if (part.type === "tool") {
+      if (part.type === 'tool') {
         numToolCalls += 1;
         toolUsesByType[classifyToolUse(part.tool)] += 1;
         continue;
       }
-      if (typeof part.type === "string" && part.type.includes("reasoning")) {
+      if (typeof part.type === 'string' && part.type.includes('reasoning')) {
         reasoningPartCount += 1;
       }
     }
@@ -375,7 +369,6 @@ function summarizeSessionMessages(messages: SessionMessage[]): {
     },
   };
 }
-
 
 function formatModelRef(model: TaskModelRef): string {
   return `${model.providerID}/${model.modelID}`;
@@ -406,7 +399,7 @@ function renderObservedCountLines(summary: TaskTurnSummary): string[] {
   return [
     `- Turns observed: ${summary.turnCount}`,
     `- Reasoning parts observed: ${summary.reasoningPartCount}`,
-    "- Tool uses by type:",
+    '- Tool uses by type:',
     ...TOOL_USE_TYPES.map((toolType) => {
       return `  - ${toolType}: ${summary.toolUsesByType[toolType]}`;
     }),
@@ -437,8 +430,8 @@ function renderTranscriptNarrativeLines(summary: TaskTurnSummary): string[] {
 function renderTurnSummaryLines(summary: TaskTurnSummary): string[] {
   return [
     ...renderTranscriptNarrativeLines(summary),
-    "",
-    "### Observed Counts",
+    '',
+    '### Observed Counts',
     ...renderObservedCountLines(summary),
   ];
 }
@@ -447,36 +440,39 @@ function buildTaskSummaryOutput(
   summary: TaskSuccessSummary,
   verificationPassphrase: string,
 ): string {
-  return appendVerificationPassphrase([
-    "---",
-    `session_id: ${JSON.stringify(summary.sessionID)}`,
-    `tokens_used: ${summary.tokensUsed}`,
-    `num_tool_calls: ${summary.numToolCalls}`,
-    `transcript_path: ${JSON.stringify(summary.transcriptPath)}`,
-    `time_elapsed: ${JSON.stringify(formatTimeElapsed(summary.timeElapsedMs))}`,
-    "---",
-    "",
-    "## Agent's Last Message",
-    summary.finalResultText,
-    "",
-    "## Turn-by-Turn Summary",
-    ...renderTurnSummaryLines(summary.turnSummary),
-    "",
-    "## Completion Review",
-    `- Completion confidence score: ${summary.completionConfidenceScore.toFixed(2)}`,
-    `- Transcript saved to: \`${summary.transcriptPath}\``,
-  ], verificationPassphrase).join("\n");
+  return appendVerificationPassphrase(
+    [
+      '---',
+      `session_id: ${JSON.stringify(summary.sessionID)}`,
+      `tokens_used: ${summary.tokensUsed}`,
+      `num_tool_calls: ${summary.numToolCalls}`,
+      `transcript_path: ${JSON.stringify(summary.transcriptPath)}`,
+      `time_elapsed: ${JSON.stringify(formatTimeElapsed(summary.timeElapsedMs))}`,
+      '---',
+      '',
+      "## Agent's Last Message",
+      summary.finalResultText,
+      '',
+      '## Turn-by-Turn Summary',
+      ...renderTurnSummaryLines(summary.turnSummary),
+      '',
+      '## Completion Review',
+      `- Completion confidence score: ${summary.completionConfidenceScore.toFixed(2)}`,
+      `- Transcript saved to: \`${summary.transcriptPath}\``,
+    ],
+    verificationPassphrase,
+  ).join('\n');
 }
 
 function buildPublishedReportOutput(input: { sessionID: string }): string {
   return [
-    "---",
+    '---',
     `session_id: ${JSON.stringify(input.sessionID)}`,
-    "report_published: true",
-    "---",
-    "",
-    "The full subagent results report has been published in chat.",
-  ].join("\n");
+    'report_published: true',
+    '---',
+    '',
+    'The full subagent results report has been published in chat.',
+  ].join('\n');
 }
 
 function buildAsyncRunningOutput(input: {
@@ -485,20 +481,20 @@ function buildAsyncRunningOutput(input: {
   subagentModel: string;
 }): string {
   return [
-    "---",
-    "status: running",
+    '---',
+    'status: running',
     `session_id: ${JSON.stringify(input.sessionID)}`,
     `subagent_type: ${JSON.stringify(input.subagentType)}`,
     `subagent_model: ${JSON.stringify(input.subagentModel)}`,
-    "---",
-    "",
+    '---',
+    '',
     "## Agent's Last Message",
-    "Task is running in the background. A callback will deliver the final report when complete.",
-    "",
-    "## Follow-up",
+    'Task is running in the background. A callback will deliver the final report when complete.',
+    '',
+    '## Follow-up',
     `- Monitor progress by opening child session \`${input.sessionID}\` in the TUI session tree.`,
     `- Resume: call \`task\` again with \`session_id: ${input.sessionID}\` and a new \`prompt\`.`,
-  ].join("\n");
+  ].join('\n');
 }
 
 function buildAsyncHeartbeat(input: {
@@ -507,46 +503,52 @@ function buildAsyncHeartbeat(input: {
   elapsedMs: number;
 }): string {
   return [
-    "[task_async_heartbeat]",
-    "status: running",
+    '[task_async_heartbeat]',
+    'status: running',
     `session_id: ${input.sessionID}`,
     `subagent_type: ${input.subagentType}`,
     `elapsed_ms: ${input.elapsedMs}`,
-  ].join("\n");
+  ].join('\n');
 }
 
-function buildTaskFailureOutput(input: {
-  sessionID: string;
-  subagentType: string;
-  subagentModel: string;
-  timeElapsedMs: number;
-  errorMessage: string;
-  transcriptPath?: string;
-  timeoutMs?: number;
-}, verificationPassphrase: string): string {
+function buildTaskFailureOutput(
+  input: {
+    sessionID: string;
+    subagentType: string;
+    subagentModel: string;
+    timeElapsedMs: number;
+    errorMessage: string;
+    transcriptPath?: string;
+    timeoutMs?: number;
+  },
+  verificationPassphrase: string,
+): string {
   const timeoutBlock =
-    typeof input.timeoutMs === "number"
+    typeof input.timeoutMs === 'number'
       ? [
-          "",
-          "## Timeout Details",
+          '',
+          '## Timeout Details',
           `- Configured limit: ${timeoutSeconds(input.timeoutMs)} seconds`,
         ]
       : [];
 
-  return appendVerificationPassphrase([
-    "[task_failed]",
-    `session_id: ${JSON.stringify(input.sessionID)}`,
-    `subagent_type: ${JSON.stringify(input.subagentType)}`,
-    `subagent_model: ${JSON.stringify(input.subagentModel)}`,
-    `time_elapsed: ${JSON.stringify(formatTimeElapsed(input.timeElapsedMs))}`,
-    ...(input.transcriptPath
-      ? [`transcript_path: ${JSON.stringify(input.transcriptPath)}`]
-      : []),
-    "",
-    "## Failure",
-    input.errorMessage,
-    ...timeoutBlock,
-  ], verificationPassphrase).join("\n");
+  return appendVerificationPassphrase(
+    [
+      '[task_failed]',
+      `session_id: ${JSON.stringify(input.sessionID)}`,
+      `subagent_type: ${JSON.stringify(input.subagentType)}`,
+      `subagent_model: ${JSON.stringify(input.subagentModel)}`,
+      `time_elapsed: ${JSON.stringify(formatTimeElapsed(input.timeElapsedMs))}`,
+      ...(input.transcriptPath
+        ? [`transcript_path: ${JSON.stringify(input.transcriptPath)}`]
+        : []),
+      '',
+      '## Failure',
+      input.errorMessage,
+      ...timeoutBlock,
+    ],
+    verificationPassphrase,
+  ).join('\n');
 }
 
 export const taskReportTesting = {
@@ -564,11 +566,11 @@ export const taskReportTesting = {
 
 function buildDisplayedReportReminder(): string {
   return [
-    "<system-reminder>",
-    "The subagent results report has already been displayed in chat.",
-    "Refer to that displayed report instead of reconstructing it unless the user asks for it again.",
-    "</system-reminder>",
-  ].join("\n");
+    '<system-reminder>',
+    'The subagent results report has already been displayed in chat.',
+    'Refer to that displayed report instead of reconstructing it unless the user asks for it again.',
+    '</system-reminder>',
+  ].join('\n');
 }
 
 function extractStructuredSessionID(output: string): string | undefined {
@@ -592,14 +594,14 @@ async function loadTranscriptSummaryPrompt(): Promise<string> {
   }
 
   const { stdout } = await execFileAsync(
-    "uvx",
+    'uvx',
     [
-      "--from",
+      '--from',
       AI_PROMPTS_PACKAGE,
-      "ai-prompts",
-      "get",
+      'ai-prompts',
+      'get',
       TRANSCRIPT_SUMMARY_PROMPT_SLUG,
-      "--json",
+      '--json',
     ],
     {
       timeout: CLI_TIMEOUT_MS,
@@ -608,7 +610,7 @@ async function loadTranscriptSummaryPrompt(): Promise<string> {
   );
 
   const payload = JSON.parse(stdout) as AiPromptEntry;
-  if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
+  if (typeof payload.text !== 'string' || payload.text.trim().length === 0) {
     throw new Error(
       `Prompt ${TRANSCRIPT_SUMMARY_PROMPT_SLUG} did not return prompt text.`,
     );
@@ -619,17 +621,17 @@ async function loadTranscriptSummaryPrompt(): Promise<string> {
 }
 
 function normalizeTranscriptDocument(input: unknown): TranscriptDocument {
-  if (!input || typeof input !== "object") {
-    throw new Error("Transcript renderer returned a non-object payload.");
+  if (!input || typeof input !== 'object') {
+    throw new Error('Transcript renderer returned a non-object payload.');
   }
   const transcript = input as Partial<TranscriptDocument>;
   if (
-    typeof transcript.sessionID !== "string" ||
-    typeof transcript.title !== "string" ||
-    typeof transcript.directory !== "string" ||
+    typeof transcript.sessionID !== 'string' ||
+    typeof transcript.title !== 'string' ||
+    typeof transcript.directory !== 'string' ||
     !Array.isArray(transcript.turns)
   ) {
-    throw new Error("Transcript renderer returned an invalid transcript document.");
+    throw new Error('Transcript renderer returned an invalid transcript document.');
   }
   return transcript as TranscriptDocument;
 }
@@ -661,18 +663,12 @@ async function runTemplateSummary(
         null,
         2,
       ),
-      "utf8",
+      'utf8',
     );
 
     const { stdout } = await execFileAsync(
-      "uvx",
-      [
-        "--from",
-        LLM_RUNNER_PACKAGE,
-        "llm-run",
-        "--input",
-        requestPath,
-      ],
+      'uvx',
+      ['--from', LLM_RUNNER_PACKAGE, 'llm-run', '--input', requestPath],
       {
         timeout: CLI_TIMEOUT_MS,
         maxBuffer: CLI_MAX_BUFFER,
@@ -682,8 +678,8 @@ async function runTemplateSummary(
     const payload = JSON.parse(stdout) as RunnerResponse<TranscriptSummaryStructured>;
     const structured =
       payload.final_output?.data ?? payload.response?.structured ?? null;
-    if (!structured || typeof structured !== "object") {
-      throw new Error("Transcript summary runner returned no structured payload.");
+    if (!structured || typeof structured !== 'object') {
+      throw new Error('Transcript summary runner returned no structured payload.');
     }
     return structured;
   } finally {
@@ -697,44 +693,45 @@ function normalizeTranscriptSummary(
   const toolCalls = Array.isArray(input.tool_calls)
     ? input.tool_calls.flatMap((entry) => {
         if (
-          typeof entry?.tool !== "string" ||
-          typeof entry?.purpose !== "string" ||
-          typeof entry?.result !== "string"
+          typeof entry?.tool !== 'string' ||
+          typeof entry?.purpose !== 'string' ||
+          typeof entry?.result !== 'string'
         ) {
           return [];
         }
-        return [{
-          tool: entry.tool.trim(),
-          purpose: entry.purpose.trim(),
-          result: entry.result.trim(),
-        }];
+        return [
+          {
+            tool: entry.tool.trim(),
+            purpose: entry.purpose.trim(),
+            result: entry.result.trim(),
+          },
+        ];
       })
     : [];
 
   const reasoningSteps = Array.isArray(input.reasoning_steps)
     ? input.reasoning_steps
-        .filter((step): step is string => typeof step === "string")
+        .filter((step): step is string => typeof step === 'string')
         .map((step) => step.trim())
         .filter(Boolean)
     : [];
 
   const edits = Array.isArray(input.edits)
     ? input.edits.flatMap((entry) => {
-        if (
-          typeof entry?.target !== "string" ||
-          typeof entry?.rationale !== "string"
-        ) {
+        if (typeof entry?.target !== 'string' || typeof entry?.rationale !== 'string') {
           return [];
         }
-        return [{
-          target: entry.target.trim(),
-          rationale: entry.rationale.trim(),
-        }];
+        return [
+          {
+            target: entry.target.trim(),
+            rationale: entry.rationale.trim(),
+          },
+        ];
       })
     : [];
 
   const outcome =
-    typeof input.outcome === "string" && input.outcome.trim().length > 0
+    typeof input.outcome === 'string' && input.outcome.trim().length > 0
       ? input.outcome.trim()
       : emptyTranscriptNarrativeSummary().outcome;
 
@@ -772,14 +769,14 @@ async function loadTranscriptArtifact(sessionID: string): Promise<TranscriptArti
     `opencode-task-${sessionID}-${Date.now()}.transcript.json`,
   );
   const { stdout } = await execFileAsync(
-    "npx",
+    'uvx',
     [
-      "--yes",
-      `--package=${OPENCODE_MANAGER_PACKAGE}`,
-      "opx-session",
-      "transcript",
+      '--from',
+      OPENCODE_MANAGER_PACKAGE,
+      'ocm',
+      'transcript',
       sessionID,
-      "--json",
+      '--json',
     ],
     {
       timeout: CLI_TIMEOUT_MS,
@@ -787,7 +784,7 @@ async function loadTranscriptArtifact(sessionID: string): Promise<TranscriptArti
       env: process.env,
     },
   );
-  await fs.writeFile(outPath, stdout, "utf8");
+  await fs.writeFile(outPath, stdout, 'utf8');
   return {
     document: normalizeTranscriptDocument(JSON.parse(stdout)),
     path: outPath,
@@ -800,14 +797,14 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
   let cachedAt = 0;
 
   const log = async (
-    level: "debug" | "info" | "warn" | "error",
+    level: 'debug' | 'info' | 'warn' | 'error',
     message: string,
     extra?: Record<string, unknown>,
   ): Promise<void> => {
     try {
       await client.app.log({
         body: {
-          service: "task-plugin",
+          service: 'task-plugin',
           level,
           message,
           extra,
@@ -844,11 +841,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
     force = false,
   ): Promise<CachedSubagent[]> => {
     const cacheAgeMs = Date.now() - cachedAt;
-    if (
-      !force &&
-      cachedSubagents.length > 0 &&
-      cacheAgeMs < SUBAGENT_CACHE_TTL_MS
-    ) {
+    if (!force && cachedSubagents.length > 0 && cacheAgeMs < SUBAGENT_CACHE_TTL_MS) {
       return cachedSubagents;
     }
 
@@ -862,11 +855,11 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       const response = await withTimeout(
         client.app.agents(),
         AGENT_FETCH_TIMEOUT_MS,
-        "client.app.agents()",
+        'client.app.agents()',
       );
       const data = response.data;
       if (!Array.isArray(data)) {
-        await log("warn", "Agent list unavailable; using cached subagents", {
+        await log('warn', 'Agent list unavailable; using cached subagents', {
           reason,
           hasCache: cachedSubagents.length > 0,
         });
@@ -875,8 +868,8 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       agentList = data.map((agent) => ({
         name: agent.name,
         description:
-          typeof agent.description === "string" ? agent.description : undefined,
-        mode: typeof agent.mode === "string" ? agent.mode : undefined,
+          typeof agent.description === 'string' ? agent.description : undefined,
+        mode: typeof agent.mode === 'string' ? agent.mode : undefined,
         model: agent.model
           ? {
               providerID: agent.model.providerID,
@@ -885,20 +878,16 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
           : undefined,
       }));
     } catch (error) {
-      await log(
-        "warn",
-        "Agent fetch timed out/failed; using cached subagents",
-        {
-          reason,
-          hasCache: cachedSubagents.length > 0,
-          error: String(error),
-        },
-      );
+      await log('warn', 'Agent fetch timed out/failed; using cached subagents', {
+        reason,
+        hasCache: cachedSubagents.length > 0,
+        error: String(error),
+      });
       return cachedSubagents;
     }
 
     const subagents = agentList
-      .filter((agent) => agent.mode !== "primary")
+      .filter((agent) => agent.mode !== 'primary')
       .sort((a, b) => a.name.localeCompare(b.name));
 
     cachedSubagents = subagents;
@@ -908,11 +897,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
 
   const sessionExists = async (id: string): Promise<boolean> => {
     const { data, error } = await client.session.list({});
-    return (
-      !error &&
-      Array.isArray(data) &&
-      data.some((session) => session?.id === id)
-    );
+    return !error && Array.isArray(data) && data.some((session) => session?.id === id);
   };
 
   const resolveChildSessionID = async (input: {
@@ -949,27 +934,26 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       },
     });
 
-    if (error || !data || typeof data !== "object") return undefined;
+    if (error || !data || typeof data !== 'object') return undefined;
 
     const info =
-      typeof (data as { info?: unknown }).info === "object" &&
+      typeof (data as { info?: unknown }).info === 'object' &&
       (data as { info?: unknown }).info
         ? ((data as { info: Record<string, unknown> }).info ?? {})
         : {};
 
     const providerID =
-      typeof info.providerID === "string" ? info.providerID : undefined;
-    const modelID = typeof info.modelID === "string" ? info.modelID : undefined;
+      typeof info.providerID === 'string' ? info.providerID : undefined;
+    const modelID = typeof info.modelID === 'string' ? info.modelID : undefined;
     if (!providerID || !modelID) return undefined;
 
     return { providerID, modelID };
   };
 
   const summarizeChildSession = async (sessionID: string) => {
-    const { data: rawMessages, error: messagesError } =
-      await client.session.messages({
-        path: { id: sessionID },
-      });
+    const { data: rawMessages, error: messagesError } = await client.session.messages({
+      path: { id: sessionID },
+    });
     if (messagesError || !Array.isArray(rawMessages)) {
       throw new Error(
         `Failed to load child session messages: ${String(messagesError)}`,
@@ -993,7 +977,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       path: { id: input.sessionID },
       body: {
         noReply: true,
-        parts: [{ type: "text", text: input.report }],
+        parts: [{ type: 'text', text: input.report }],
       },
     });
 
@@ -1003,7 +987,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         noReply: true,
         parts: [
           {
-            type: "text",
+            type: 'text',
             synthetic: true,
             text: buildDisplayedReportReminder(),
           },
@@ -1025,11 +1009,11 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         .abort({ path: { id: input.childSessionID } })
         .catch(() => {});
     };
-    input.abortSignal?.addEventListener("abort", abortHandler);
+    input.abortSignal?.addEventListener('abort', abortHandler);
 
     try {
       const startedAt = Date.now();
-      let text = "";
+      let text = '';
       let timedOut = false;
       try {
         const promptRequest = client.session.prompt({
@@ -1037,19 +1021,19 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
           body: {
             agent: input.subagent.name,
             model: input.model,
-            parts: [{ type: "text", text: input.prompt }],
+            parts: [{ type: 'text', text: input.prompt }],
           },
         });
         const { data: result, error } =
-          typeof input.timeoutMs === "number"
+          typeof input.timeoutMs === 'number'
             ? await withTimeout(
                 promptRequest,
                 input.timeoutMs,
                 `Subagent prompt for session ${input.childSessionID}`,
                 async () => {
                   await log(
-                    "warn",
-                    "Subagent prompt timed out; aborting child session",
+                    'warn',
+                    'Subagent prompt timed out; aborting child session',
                     {
                       childSessionID: input.childSessionID,
                       timeoutMs: input.timeoutMs,
@@ -1068,16 +1052,13 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         }
 
         const parts =
-          (
-            result as
-              | { parts?: Array<{ type?: string; text?: string }> }
-              | undefined
-          )?.parts ?? [];
+          (result as { parts?: Array<{ type?: string; text?: string }> } | undefined)
+            ?.parts ?? [];
         text = extractText(parts);
       } catch (error) {
         if (error instanceof TaskTimeoutError) {
           timedOut = true;
-          await log("warn", "Subagent timeout reached", {
+          await log('warn', 'Subagent timeout reached', {
             childSessionID: input.childSessionID,
             subagentType: input.subagent.name,
             timeoutMs: input.timeoutMs,
@@ -1089,7 +1070,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
 
       const elapsedMs = Date.now() - startedAt;
       const finalResultText =
-        text.length > 0 ? text : "Subagent completed without a text response.";
+        text.length > 0 ? text : 'Subagent completed without a text response.';
       const renderedModel = formatModelRef(input.model);
       const sessionSummary = await summarizeChildSession(input.childSessionID);
       const transcript = await loadTranscriptArtifact(input.childSessionID);
@@ -1102,14 +1083,14 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       if (timedOut) {
         const timeoutErrorMessage = [
           `Subagent timeout reached after ${
-            typeof input.timeoutMs === "number"
+            typeof input.timeoutMs === 'number'
               ? timeoutSeconds(input.timeoutMs)
               : timeoutSeconds(elapsedMs)
           } seconds.`,
-          "The transcript may contain partial progress up to the timeout boundary.",
-        ].join(" ");
+          'The transcript may contain partial progress up to the timeout boundary.',
+        ].join(' ');
 
-        await log("warn", "Task timed out", {
+        await log('warn', 'Task timed out', {
           childSessionID: input.childSessionID,
           subagentType: input.subagent.name,
           elapsedMs,
@@ -1117,7 +1098,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
           transcriptPath: transcript.path,
           tokensUsed: sessionSummary.tokensUsed,
           reasoningPartCount: sessionSummary.turnSummary.reasoningPartCount,
-          ...(typeof input.timeoutMs === "number"
+          ...(typeof input.timeoutMs === 'number'
             ? {
                 timeoutMs: input.timeoutMs,
                 timeoutSeconds: timeoutSeconds(input.timeoutMs),
@@ -1126,7 +1107,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         });
 
         return {
-          kind: "failure",
+          kind: 'failure',
           failure: {
             sessionID: input.childSessionID,
             subagentType: input.subagent.name,
@@ -1134,7 +1115,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
             timeElapsedMs: elapsedMs,
             errorMessage: timeoutErrorMessage,
             transcriptPath: transcript.path,
-            ...(typeof input.timeoutMs === "number"
+            ...(typeof input.timeoutMs === 'number'
               ? { timeoutMs: input.timeoutMs }
               : {}),
           },
@@ -1148,7 +1129,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         reasoningPartCount: sessionSummary.turnSummary.reasoningPartCount,
       });
 
-      await log("info", "Task completed", {
+      await log('info', 'Task completed', {
         childSessionID: input.childSessionID,
         subagentType: input.subagent.name,
         elapsedMs,
@@ -1161,7 +1142,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       });
 
       return {
-        kind: "success",
+        kind: 'success',
         summary: {
           sessionID: input.childSessionID,
           subagentType: input.subagent.name,
@@ -1179,7 +1160,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         },
       };
     } finally {
-      input.abortSignal?.removeEventListener("abort", abortHandler);
+      input.abortSignal?.removeEventListener('abort', abortHandler);
     }
   };
 
@@ -1191,7 +1172,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       path: { id: input.sessionID },
       body: {
         noReply: true,
-        parts: [{ type: "text", text: input.text }],
+        parts: [{ type: 'text', text: input.text }],
       },
     });
   };
@@ -1216,7 +1197,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         sessionID: input.parentSessionID,
         text: heartbeatText,
       }).catch(async (error) => {
-        await log("warn", "Async heartbeat emit failed", {
+        await log('warn', 'Async heartbeat emit failed', {
           parentSessionID: input.parentSessionID,
           childSessionID: input.childSessionID,
           error: String(error),
@@ -1234,25 +1215,25 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         timeoutMs: input.timeoutMs,
       });
       const report =
-        result.kind === "success"
+        result.kind === 'success'
           ? buildTaskSummaryOutput(result.summary, input.verificationPassphrase)
-          : buildTaskFailureOutput(
-              result.failure,
-              input.verificationPassphrase,
-            );
+          : buildTaskFailureOutput(result.failure, input.verificationPassphrase);
       await publishSessionReport({
         sessionID: input.parentSessionID,
         report,
       });
     } catch (error) {
-      const failureText = buildTaskFailureOutput({
-        sessionID: input.childSessionID,
-        subagentType: input.subagent.name,
-        subagentModel: formatModelRef(input.model),
-        timeElapsedMs: Date.now() - startedAt,
-        errorMessage: String(error),
-      }, input.verificationPassphrase);
-      await log("error", "Async task failed", {
+      const failureText = buildTaskFailureOutput(
+        {
+          sessionID: input.childSessionID,
+          subagentType: input.subagent.name,
+          subagentModel: formatModelRef(input.model),
+          timeElapsedMs: Date.now() - startedAt,
+          errorMessage: String(error),
+        },
+        input.verificationPassphrase,
+      );
+      await log('error', 'Async task failed', {
         parentSessionID: input.parentSessionID,
         childSessionID: input.childSessionID,
         error: String(error),
@@ -1261,7 +1242,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         sessionID: input.parentSessionID,
         report: failureText,
       }).catch(async (emitError) => {
-        await log("error", "Async failure callback emit failed", {
+        await log('error', 'Async failure callback emit failed', {
           parentSessionID: input.parentSessionID,
           childSessionID: input.childSessionID,
           error: String(emitError),
@@ -1278,39 +1259,37 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
       args: {
         description: tool.schema
           .string()
-          .describe("A short (3-5 words) description of the task"),
-        prompt: tool.schema
-          .string()
-          .describe("The task for the agent to perform"),
+          .describe('A short (3-5 words) description of the task'),
+        prompt: tool.schema.string().describe('The task for the agent to perform'),
         subagent_type: tool.schema
           .string()
-          .describe("The type of specialized agent to use for this task"),
+          .describe('The type of specialized agent to use for this task'),
         mode: tool.schema
           .string()
           .optional()
           .describe(
-            "Execution mode for delegation: `sync` (default, blocking) or `async` (non-blocking background).",
+            'Execution mode for delegation: `sync` (default, blocking) or `async` (non-blocking background).',
           ),
         timeout_ms: tool.schema
           .number()
           .optional()
           .describe(
-            "Hard timeout in milliseconds (default: 1800000 = 30m). Do not usually change this; lower only for finite-turn tasks (roughly 10-20 turns/min) when hangs/provider stalls are suspected. See the `difficulty-and-time-estimation` skill before nontrivial changes.",
+            'Hard timeout in milliseconds (default: 1800000 = 30m). Do not usually change this; lower only for finite-turn tasks (roughly 10-20 turns/min) when hangs/provider stalls are suspected. See the `difficulty-and-time-estimation` skill before nontrivial changes.',
           ),
         session_id: tool.schema
           .string()
           .optional()
           .describe(
-            "Optional existing session ID to resume instead of creating a new child session.",
+            'Optional existing session ID to resume instead of creating a new child session.',
           ),
       },
       async execute(args, context) {
-        await fetchSubagents("task_execute", true);
+        await fetchSubagents('task_execute', true);
 
         await context.ask({
-          permission: "task",
+          permission: 'task',
           patterns: [args.subagent_type],
-          always: ["*"],
+          always: ['*'],
           metadata: {
             description: args.description,
             subagent_type: args.subagent_type,
@@ -1341,8 +1320,8 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
           throw new Error(
             [
               `No model resolved for subagent_type="${args.subagent_type}".`,
-              "Set a model on the subagent config or ensure the parent message has model metadata.",
-            ].join(" "),
+              'Set a model on the subagent config or ensure the parent message has model metadata.',
+            ].join(' '),
           );
         }
 
@@ -1361,8 +1340,8 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
           },
         });
 
-        const mode = args.mode ? args.mode.trim().toLowerCase() : "sync";
-        if (mode !== "sync" && mode !== "async") {
+        const mode = args.mode ? args.mode.trim().toLowerCase() : 'sync';
+        if (mode !== 'sync' && mode !== 'async') {
           throw new Error(
             `Invalid mode: ${JSON.stringify(args.mode)}. Expected "sync" or "async".`,
           );
@@ -1370,9 +1349,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         let timeoutMs = DEFAULT_TASK_TIMEOUT_MS;
         if (args.timeout_ms !== undefined) {
           if (!Number.isFinite(args.timeout_ms)) {
-            throw new Error(
-              `Invalid timeout_ms: ${JSON.stringify(args.timeout_ms)}.`,
-            );
+            throw new Error(`Invalid timeout_ms: ${JSON.stringify(args.timeout_ms)}.`);
           }
           timeoutMs = Math.floor(args.timeout_ms);
           if (timeoutMs <= 0 || timeoutMs > 86_400_000) {
@@ -1384,10 +1361,10 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
 
         const verificationPassphrase = buildPassphrase(
           toolName,
-          `${mode}:${childSession.resumed ? "resume" : "new"}` as VerificationPath,
+          `${mode}:${childSession.resumed ? 'resume' : 'new'}` as VerificationPath,
         );
 
-        if (mode === "async") {
+        if (mode === 'async') {
           void runAsyncLifecycle({
             parentSessionID: context.sessionID,
             childSessionID: childSession.sessionID,
@@ -1398,7 +1375,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
             verificationPassphrase,
           });
 
-          await log("info", "Async task dispatched", {
+          await log('info', 'Async task dispatched', {
             parentSessionID: context.sessionID,
             childSessionID: childSession.sessionID,
             subagentType: subagent.name,
@@ -1423,9 +1400,10 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
             timeoutMs,
             abortSignal: context.abort,
           });
-          const report = result.kind === "success"
-            ? buildTaskSummaryOutput(result.summary, verificationPassphrase)
-            : buildTaskFailureOutput(result.failure, verificationPassphrase);
+          const report =
+            result.kind === 'success'
+              ? buildTaskSummaryOutput(result.summary, verificationPassphrase)
+              : buildTaskFailureOutput(result.failure, verificationPassphrase);
           await publishSessionReport({
             sessionID: context.sessionID,
             report,
@@ -1434,13 +1412,16 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
             sessionID: childSession.sessionID,
           });
         } catch (error) {
-          const report = buildTaskFailureOutput({
-            sessionID: childSession.sessionID,
-            subagentType: subagent.name,
-            subagentModel: formatModelRef(model),
-            timeElapsedMs: 0,
-            errorMessage: String(error),
-          }, verificationPassphrase);
+          const report = buildTaskFailureOutput(
+            {
+              sessionID: childSession.sessionID,
+              subagentType: subagent.name,
+              subagentModel: formatModelRef(model),
+              timeElapsedMs: 0,
+              errorMessage: String(error),
+            },
+            verificationPassphrase,
+          );
           await publishSessionReport({
             sessionID: context.sessionID,
             report,
@@ -1453,7 +1434,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
     });
 
   return {
-    async "tool.definition"(
+    async 'tool.definition'(
       { toolID }: { toolID: string },
       output: { description: string; parameters: unknown },
     ) {
@@ -1461,10 +1442,10 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         return;
       }
 
-      const subagents = await fetchSubagents("tool_definition", false);
+      const subagents = await fetchSubagents('tool_definition', false);
       output.description = buildTaskToolDescription(subagents, toolID);
     },
-    async "tool.execute.after"(
+    async 'tool.execute.after'(
       {
         tool,
         args,
@@ -1484,12 +1465,12 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         return;
       }
 
-      if (!output.title && typeof args.description === "string") {
+      if (!output.title && typeof args.description === 'string') {
         output.title = args.description;
       }
 
       const sessionID =
-        typeof output.metadata?.sessionId === "string"
+        typeof output.metadata?.sessionId === 'string'
           ? (output.metadata.sessionId as string)
           : extractStructuredSessionID(output.output);
       if (!sessionID) {
