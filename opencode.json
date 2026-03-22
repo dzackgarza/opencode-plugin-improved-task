@@ -7,6 +7,7 @@
     "improved-task-proof": {
       "model": "github-copilot/gpt-4.1",
       "permission": {
+        "*": "deny",
         "improved_task": "allow",
         "bash": "deny",
         "read": "deny",
@@ -21,6 +22,7 @@
     "task-proof": {
       "model": "github-copilot/gpt-4.1",
       "permission": {
+        "*": "deny",
         "task": "allow",
         "bash": "deny",
         "read": "deny",
