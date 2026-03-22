@@ -1367,7 +1367,7 @@ export const ImprovedTaskPlugin: Plugin = async ({ client }) => {
         await fetchSubagents('task_execute', true);
 
         await context.ask({
-          permission: 'task',
+          permission: toolName,
           patterns: [args.subagent_type],
           always: ['*'],
           metadata: {
